@@ -53,11 +53,13 @@ v10: вариант C задержек для леса/боя + 'Вылазка'
 ```env
 DUNGEON_ENABLED=1
 LMSTUDIO_BASE_URL=http://127.0.0.1:1234/v1
-LMSTUDIO_MODEL=qwen/qwen3-8b
+LMSTUDIO_MODEL=google/gemma-4-e4b
 LMSTUDIO_TIMEOUT_SEC=20
 LMSTUDIO_TEMPERATURE=0.1
 LMSTUDIO_MAX_TOKENS=80
 ```
 
 Когда бот увидит экран данжа с вариантами выбора, он отправит текст и кнопки в LM Studio и нажмёт выбранную кнопку.
+
+Если `LMSTUDIO_MODEL` не найден в `/v1/models`, бот автоматически выберет первую не-embedding модель из списка.
 
