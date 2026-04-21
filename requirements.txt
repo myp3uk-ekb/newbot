@@ -1,0 +1,5 @@
+telethon==1.36.0
+sqlmodel==0.0.22
+pydantic==2.9.2
+python-dotenv==1.0.1
+qrcode==7.4.2
