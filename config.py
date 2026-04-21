@@ -115,6 +115,15 @@ class Config(BaseModel):
     heal_after_click_wait_sec: float = float(os.getenv('HEAL_AFTER_CLICK_WAIT_SEC', '0.25'))
     heal_hp_update_timeout_sec: float = float(os.getenv('HEAL_HP_UPDATE_TIMEOUT_SEC', '0.8'))
 
+
+
+    # LM Studio (local LLM) for dungeon decisions.
+    lmstudio_base_url: str = str(os.getenv('LMSTUDIO_BASE_URL', 'http://127.0.0.1:1234/v1') or 'http://127.0.0.1:1234/v1').strip()
+    lmstudio_model: str = str(os.getenv('LMSTUDIO_MODEL', 'local-model') or 'local-model').strip()
+    lmstudio_timeout_sec: float = float(os.getenv('LMSTUDIO_TIMEOUT_SEC', '20'))
+    lmstudio_temperature: float = float(os.getenv('LMSTUDIO_TEMPERATURE', '0.1'))
+    lmstudio_max_tokens: int = int(os.getenv('LMSTUDIO_MAX_TOKENS', '80'))
+
     # legacy names kept for compatibility (do not use in new code)
     forest_enabled: bool = mod_forest_enabled
     fishing_enabled: bool = mod_fishing_enabled

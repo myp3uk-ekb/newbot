@@ -33,6 +33,7 @@ kv = _KVShim()
 from game_parser import parse_message, is_bite_text, is_result_text, BITE_TRIGGERS, RESULT_TRIGGERS
 from strategy import Profile, choose_target
 from actions import click_button, click_button_contains
+from dungeon_lm import ask_lmstudio_choice, looks_like_dungeon_prompt
 
 
 _FAQ_TEXT = 'FAQ — как пользоваться автопилотом\n\n• Запуск:\n  1) Заполни API_ID / API_HASH и прочие параметры в .env / config.py\n  2) Установи зависимости: pip install -r requirements.txt\n  3) Запусти: python main.py\n  4) Авторизуйся (код из Telegram)\n\n• Где писать команды управления:\n  Команды /pause /resume /status /help /version вводи ТОЛЬКО в «Избранном» (Saved Messages).\n  В игровой чат бот ничего управляющего не пишет.\n\n• Основные команды:\n  /pause      — пауза (рыбалка может продолжать работать, если включена)\n  /resume     — продолжить\n  /status     — текущие режимы/паузы\n  /help       — этот FAQ\n  /version    — версия сборки\n  /fishtriggers — показать активные рыболовные триггеры\n  /party on|off — включить/выключить party-режим\n  /partyhp 60 — порог HP для лечения в party-режиме\n  /blood hyst 60 95 — пороги гистерезиса blood-режима (в %)\n\n• HP-пауза:\n  Отправь в игру «хп». Бот распарсит ответ (💚: X/Y и “До полного восстановления …”) и поставит паузу на восстановление.\n\n• “Человеческие задержки”:\n  Действия (клики/экип) выполняются с рандомными паузами, чтобы меньше походить на макрос и не ломаться от лагов UI.\n\nЕсли что-то зависло:\n  1) /pause\n  2) проверь, что в игре актуальные кнопки\n  3) /resume\n  4) при необходимости перезапусти скрипт и смотри логи\n'
@@ -593,6 +594,82 @@ def mod_work_enabled() -> bool:
 
 def mod_dungeon_enabled() -> bool:
     return _kv_bool("mod_dungeon", False)
+
+
+def _lmstudio_enabled() -> bool:
+    return bool(getattr(CFG, "lmstudio_base_url", "").strip()) and bool(getattr(CFG, "lmstudio_model", "").strip())
+
+
+async def _handle_dungeon_with_lm(client: TelegramClient, msg: Message, state) -> bool:
+    if (not mod_dungeon_enabled()) or (not _lmstudio_enabled()):
+        return False
+
+    labels = []
+    for c in (state.buttons or []):
+        t = (c.btn_text or c.name or "").strip()
+        if t:
+            labels.append(t)
+    if len(labels) < 2:
+        return False
+
+    text = msg.message or ""
+    if not looks_like_dungeon_prompt(text, labels):
+        return False
+
+    try:
+        choice = await asyncio.to_thread(
+            ask_lmstudio_choice,
+            text=text,
+            buttons=labels,
+            base_url=getattr(CFG, "lmstudio_base_url", "http://127.0.0.1:1234/v1"),
+            model=getattr(CFG, "lmstudio_model", "local-model"),
+            timeout_sec=float(getattr(CFG, "lmstudio_timeout_sec", 20.0)),
+            temperature=float(getattr(CFG, "lmstudio_temperature", 0.1)),
+            max_tokens=int(getattr(CFG, "lmstudio_max_tokens", 80)),
+        )
+    except Exception as e:
+        log.warning(f"🕸 LM Studio недоступен: {e}")
+        return False
+
+    if not choice:
+        return False
+
+    def _n(v: str) -> str:
+        return _norm_btn_label(v)
+
+    selected = None
+    choice_n = _n(choice)
+    for c in state.buttons:
+        lbl = (c.btn_text or c.name or "").strip()
+        if _n(lbl) == choice_n:
+            selected = c
+            break
+    if selected is None:
+        # fallback contains match when model trimmed emoji/prefix
+        for c in state.buttons:
+            lbl = (c.btn_text or c.name or "").strip()
+            nl = _n(lbl)
+            if choice_n and (choice_n in nl or nl in choice_n):
+                selected = c
+                break
+
+    if selected is None:
+        log.warning(f"🕸 LM Studio предложил неизвестную кнопку: {choice!r}")
+        return False
+
+    try:
+        await asyncio.sleep(human_delay_combat("battle"))
+        if selected.pos is not None:
+            await click_button(client, msg, pos=selected.pos)
+        elif selected.btn_text:
+            await click_button(client, msg, text=selected.btn_text)
+        else:
+            await click_button(client, msg, text=selected.name)
+        log.info(f"🕸 Dungeon LM: выбрал '{selected.btn_text or selected.name}'")
+        return True
+    except Exception as e:
+        log.warning(f"🕸 Dungeon LM click failed: {e}")
+        return False
 
 
 def mod_pet_enabled() -> bool:
@@ -1942,7 +2019,7 @@ async def _handle_thief(client: TelegramClient, msg: Message, state, txt_full: s
     return False
 
 
-async def _handle_party_event(client: TelegramClient, msg: Message, state: ParseResult) -> bool:
+async def _handle_party_event(client: TelegramClient, msg: Message, state) -> bool:
     """Handle party/group lifecycle messages.
     Returns True if the message was handled (we clicked or changed state)."""
     if not mod_party_enabled():
@@ -2531,6 +2608,12 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
     # Forest special encounter: golem choice (attack/retreat)
     if state.stage == "golem":
         await _handle_golem_encounter(client, msg, state)
+        return
+
+    # Dungeon branching screens are often parsed as "other".
+    # Let local LM Studio choose an action when dungeon module is enabled.
+    acted_dungeon = await _handle_dungeon_with_lm(client, msg, state)
+    if acted_dungeon:
         return
 
     if not state.can_act or not state.buttons:
