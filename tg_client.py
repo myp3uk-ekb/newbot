@@ -2397,7 +2397,7 @@ async def _handle_golem_encounter(client: TelegramClient, msg, state: GameState)
         return
 
     d = human_delay_combat("golem")
-    log.info(f"🪵 Голем: fight={'on' if want_fight else 'off'} → жду {d:.2f}s и жму '{'Напасть' if want_fight else 'Отступить'}'")
+    log.info(f"🪵 Голем: flag={'on' if want_fight else 'off'} → жду {d:.2f}s и жму '{'Напасть' if want_fight else 'Отступить'}'")
     await asyncio.sleep(d)
     await click_button(client, msg, pos=pos)
     return
