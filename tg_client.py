@@ -2182,8 +2182,8 @@ async def _handle_post_battle_heal(client: TelegramClient, msg):
     # so we don't stall on low HP.
     force_heal = "противник одержал верх" in text.lower()
 
-    async def _continue_to_sortie() -> None:
-        """After heal flow, try to press 'Вылазка' even from refreshed/new messages."""
+    async def _continue_after_battle() -> None:
+        """After heal flow, continue by pressing 'Осмотреться' (fallback: 'Вылазка')."""
         try:
             # 1) Prefer original post-battle message (where inline buttons usually live)
             cur_msg = msg
@@ -2193,34 +2193,51 @@ async def _handle_post_battle_heal(client: TelegramClient, msg):
                 except Exception:
                     cur_msg = msg
 
+            pos_look = _find_pos_by_substring(cur_msg, "осмотреться")
+            if pos_look is not None:
+                await click_button(client, cur_msg, pos=pos_look)
+                return
+
             pos_v = _find_pos_by_substring(cur_msg, "вылазка")
             if pos_v is not None:
                 await click_button(client, cur_msg, pos=pos_v)
                 return
 
-            # 2) Fallback: sometimes UI updates and 'Вылазка' appears on a newer message
+            # 2) Fallback: sometimes UI updates and action buttons appear on a newer message
             recent = await _await_recent_message(
                 client,
                 chat,
-                predicate=lambda m: bool(getattr(m, "buttons", None)) and ("вылазка" in _normalize(m.message or "") or _find_pos_by_substring(m, "вылазка") is not None),
+                predicate=lambda m: bool(getattr(m, "buttons", None)) and (
+                    ("осмотреться" in _normalize(m.message or ""))
+                    or (_find_pos_by_substring(m, "осмотреться") is not None)
+                    or ("вылазка" in _normalize(m.message or ""))
+                    or (_find_pos_by_substring(m, "вылазка") is not None)
+                ),
                 timeout=4.0,
                 poll=0.8,
                 after_id=base_msg_id,
             )
             if recent is not None:
+                pos_look = _find_pos_by_substring(recent, "осмотреться")
+                if pos_look is not None:
+                    await click_button(client, recent, pos=pos_look)
+                    return
                 pos_v = _find_pos_by_substring(recent, "вылазка")
                 if pos_v is not None:
                     await click_button(client, recent, pos=pos_v)
                     return
 
             # 3) Reply-keyboard fallback
-            await client.send_message(chat, "⚔️Вылазка")
+            try:
+                await client.send_message(chat, "👀Осмотреться")
+            except Exception:
+                await client.send_message(chat, "Осмотреться")
         except Exception:
             pass
 
     cur, mx = await _read_hp_from_text(text)
     if cur is None or mx is None:
-        await _continue_to_sortie()
+        await _continue_after_battle()
         return
 
     # Target HP. In party we typically want a higher target (near full),
@@ -2237,7 +2254,7 @@ async def _handle_post_battle_heal(client: TelegramClient, msg):
     # In party mode, healing is always enabled and controlled only by /partyhp threshold.
     # Outside party, global /heal on|off still controls post-battle healing.
     if (not is_party_active()) and (not mod_heal_enabled()) and (not force_heal):
-        await _continue_to_sortie()
+        await _continue_after_battle()
         return
 
     # Forced heal (after loss): use "Полное лечение" if available.
@@ -2260,7 +2277,7 @@ async def _handle_post_battle_heal(client: TelegramClient, msg):
     # If there are no potion buttons in THIS message, we still should try to continue via 'Вылазка'.
     # (Sometimes we are on an 'Использовано ...' message and action buttons are on another message.)
     if not getattr(msg, "buttons", None):
-        await _continue_to_sortie()
+        await _continue_after_battle()
         return
 
     # Choose potion to minimize waste (<= OVERHEAL_TOL), otherwise underheal.
@@ -2355,13 +2372,14 @@ async def _handle_post_battle_heal(client: TelegramClient, msg):
         if not updated:
             cur = min(mx, cur + amt)
 
-    await _continue_to_sortie()
+    await _continue_after_battle()
 
 async def _handle_golem_encounter(client: TelegramClient, msg, state: GameState):
     """Golem event in forest after victory.
 
-    - If golem fight ON: click "Напасть"
-    - If golem fight OFF: click "Отступить"
+    Respect golem flag:
+    - /golem on  -> "Напасть"
+    - /golem off -> "Отступить"
     """
     low = _normalize(msg.text or "")
     if "голем" not in low and "golem" not in low:
@@ -2369,41 +2387,19 @@ async def _handle_golem_encounter(client: TelegramClient, msg, state: GameState)
         return
 
     want_fight = mod_golem_fight_enabled()
-    # If several golems show up, we always retreat. Instead of a long pause we
-    # switch to tier 1 to dodge the wave (see battle handler as well).
-    triple_golem = bool(re.search(r"\bтро(е|их)\b.*голем|\bтри\b.*голем|\b3\b.*голем", low))
-    if triple_golem:
-        want_fight = False
     target = "напасть" if want_fight else "отступ"
     pos = _find_pos_by_substring(msg, target)
     if pos is None:
-        # try exact Russian buttons
-        pos = _find_pos_by_substring(msg, "Напасть") if want_fight else _find_pos_by_substring(msg, "Отступ")
+        # try exact Russian button
+        pos = _find_pos_by_substring(msg, "Напасть" if want_fight else "Отступить")
     if pos is None:
-        log.warning("🪵🗡️ Не нашёл кнопки 'Напасть/Отступить' на событии голема — пропускаю.")
+        log.warning("🪵🗡️ Не нашёл кнопку события голема ('Напасть/Отступить') — пропускаю.")
         return
 
     d = human_delay_combat("golem")
-    log.info(f"🪵 Голем: fight={'on' if want_fight else 'off'} → жду {d:.2f}s и жму '{'Напасть' if want_fight else 'Отступить'}'")
+    log.info(f"🪵 Голем: flag={'on' if want_fight else 'off'} → жду {d:.2f}s и жму '{'Напасть' if want_fight else 'Отступить'}'")
     await asyncio.sleep(d)
     await click_button(client, msg, pos=pos)
-
-    if triple_golem:
-        _activate_golem_wave("triple_golem")
-        # Kick forest menu so the new tier applies immediately.
-        if _golem_wave_maybe_kick():
-            await client.send_message(CFG.game_chat, CFG.forest_fallback_cmd)
-        return
-
-    # If we are in anti-wave mode (tier 1) and met a golem there — retreat, then
-    # return to the default farming tier and try again.
-    if (not want_fight) and _golem_wave_active() and (get_kv("forest_level") or "") == "1":
-        _deactivate_golem_wave("met_golem_on_tier1")
-        if _golem_wave_maybe_kick():
-            await client.send_message(CFG.game_chat, CFG.forest_fallback_cmd)
-        return
-
-    # Otherwise: single golem + fight=off → just retreat (no long cooldown).
     return
 
 async def handle_game_event(client: TelegramClient, event, kind: str):
@@ -2610,11 +2606,32 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
         await _handle_golem_encounter(client, msg, state)
         return
 
-    # Dungeon branching screens are often parsed as "other".
-    # Let local LM Studio choose an action when dungeon module is enabled.
-    acted_dungeon = await _handle_dungeon_with_lm(client, msg, state)
-    if acted_dungeon:
+    # Deterministic combat rule (no AI):
+    # - if screen offers "Напасть", always press it;
+    # - retreat is allowed only for dungeon branching screens.
+    pos_attack = _find_pos_by_substring(msg, "напасть")
+    if pos_attack is not None:
+        d = human_delay_combat("battle")
+        log.info(f"⚔️ Найдена кнопка 'Напасть' → жду {d:.2f}s и атакую")
+        await asyncio.sleep(d)
+        await click_button(client, msg, pos=pos_attack)
         return
+
+    pos_retreat = _find_pos_by_substring(msg, "сбежать")
+    if pos_retreat is None:
+        pos_retreat = _find_pos_by_substring(msg, "отступ")
+    if pos_retreat is not None:
+        labels = []
+        for c in (state.buttons or []):
+            t = (c.btn_text or c.name or "").strip()
+            if t:
+                labels.append(t)
+        if looks_like_dungeon_prompt(txt_full, labels):
+            d = human_delay_combat("battle")
+            log.info(f"🕸️ Данж: жму отступление через {d:.2f}s (разрешено только в данжеоне)")
+            await asyncio.sleep(d)
+            await click_button(client, msg, pos=pos_retreat)
+            return
 
     if not state.can_act or not state.buttons:
         return
