@@ -2377,9 +2377,9 @@ async def _handle_post_battle_heal(client: TelegramClient, msg):
 async def _handle_golem_encounter(client: TelegramClient, msg, state: GameState):
     """Golem event in forest after victory.
 
-    Respect golem flag:
-    - /golem on  -> "Напасть"
-    - /golem off -> "Отступить"
+    Respect golem mode flag:
+    - golem ON  -> click "Напасть"
+    - golem OFF -> click "Отступить"
     """
     low = _normalize(msg.text or "")
     if "голем" not in low and "golem" not in low:
@@ -2391,9 +2391,9 @@ async def _handle_golem_encounter(client: TelegramClient, msg, state: GameState)
     pos = _find_pos_by_substring(msg, target)
     if pos is None:
         # try exact Russian button
-        pos = _find_pos_by_substring(msg, "Напасть" if want_fight else "Отступить")
+        pos = _find_pos_by_substring(msg, "Напасть") if want_fight else _find_pos_by_substring(msg, "Отступ")
     if pos is None:
-        log.warning("🪵🗡️ Не нашёл кнопку события голема ('Напасть/Отступить') — пропускаю.")
+        log.warning("🪵🗡️ Не нашёл кнопку '%s' на событии голема — пропускаю.", "Напасть" if want_fight else "Отступить")
         return
 
     d = human_delay_combat("golem")
@@ -2606,9 +2606,7 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
         await _handle_golem_encounter(client, msg, state)
         return
 
-    # Deterministic combat rule (no AI):
-    # - if screen offers "Напасть", always press it;
-    # - retreat is allowed only for dungeon branching screens.
+    # Deterministic combat rule (no AI): if screen offers "Напасть", always press it.
     pos_attack = _find_pos_by_substring(msg, "напасть")
     if pos_attack is not None:
         d = human_delay_combat("battle")
@@ -2617,20 +2615,58 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
         await click_button(client, msg, pos=pos_attack)
         return
 
-    pos_retreat = _find_pos_by_substring(msg, "сбежать")
-    if pos_retreat is None:
-        pos_retreat = _find_pos_by_substring(msg, "отступ")
-    if pos_retreat is not None:
-        labels = []
-        for c in (state.buttons or []):
-            t = (c.btn_text or c.name or "").strip()
-            if t:
-                labels.append(t)
-        if looks_like_dungeon_prompt(txt_full, labels):
+    # Dungeon room chooser (no AI): choose among 1/2/3 the room with the strongest mob.
+    labels = []
+    for c in (state.buttons or []):
+        t = (c.btn_text or c.name or "").strip()
+        if t:
+            labels.append(t)
+    if looks_like_dungeon_prompt(txt_full, labels):
+        best_room = None
+        best_score = -1
+        for room in (1, 2, 3):
+            m = re.search(rf"(?:^|\n)\s*{room}\.\s*(.*?)(?=(?:\n\s*[123]\.\s)|\Z)", txt_full, re.S | re.I)
+            block = (m.group(1) if m else "") or ""
+            pm = re.search(r"противники\s*:\s*(.*?)(?:находки\s*:|$)", block, re.S | re.I)
+            pseg = (pm.group(1) if pm else block) or ""
+            pseg_main = pseg.split("👁", 1)[0]
+
+            score = 0
+            cnt = re.search(r"\b(\d+)\b", pseg_main)
+            if cnt:
+                try:
+                    score += int(cnt.group(1)) * 10
+                except Exception:
+                    pass
+            tiers = [int(x) for x in re.findall(r"\[(\d+)\]", pseg_main)]
+            if tiers:
+                score += max(tiers) * 100
+            if "⚔" in pseg_main:
+                score += 30
+
+            if score > best_score:
+                best_score = score
+                best_room = room
+
+        if best_room is not None:
+            pos_room = _find_pos_by_substring(msg, str(best_room))
+            if pos_room is not None:
+                d = human_delay_combat("battle")
+                log.info(f"🕸️ Данж: выбираю проход {best_room} (score={best_score}) через {d:.2f}s")
+                await asyncio.sleep(d)
+                await click_button(client, msg, pos=pos_room)
+                return
+
+    # After "Осмотреться" the game can say "ничего интересного" and offer "Вперёд!".
+    # Continue automatically to the next fork.
+    pos_forward = _find_pos_by_substring(msg, "впер")
+    if pos_forward is not None:
+        low_txt = _normalize_ru(txt_full)
+        if ("ничего интересного" in low_txt) or ("следующей развилке" in low_txt) or ("куда пойдем" in low_txt):
             d = human_delay_combat("battle")
-            log.info(f"🕸️ Данж: жму отступление через {d:.2f}s (разрешено только в данжеоне)")
+            log.info(f"➡️ Данж: жму 'Вперёд' через {d:.2f}s")
             await asyncio.sleep(d)
-            await click_button(client, msg, pos=pos_retreat)
+            await click_button(client, msg, pos=pos_forward)
             return
 
     if not state.can_act or not state.buttons:
