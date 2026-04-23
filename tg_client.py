@@ -3188,6 +3188,26 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
             await click_button(client, msg, index=0)
             return
 
+    # Alchemy table follow-up:
+    # equip utility set (E3) and press "Попробовать".
+    if dungeon_runtime:
+        low_txt = _normalize_ru(txt_full)
+        pos_try = _find_pos_by_substring(msg, "попроб")
+        if (
+            ("заброшенный алхимический стол" in low_txt)
+            or ("крысиную алхимическую лабораторию" in low_txt)
+            or ("крысиная алхимическая лаборатория" in low_txt)
+        ) and (pos_try is not None):
+            try:
+                await _send_set_command(client, 3)  # E3: utility/alchemy set
+            except Exception:
+                pass
+            d = human_delay_combat("battle")
+            log.info("🧪 Данж: у алхимического стола жму 'Попробовать' через %.2fs", d)
+            await asyncio.sleep(d)
+            await click_button(client, msg, pos=pos_try)
+            return
+
     # After "Осмотреться" the game can say "ничего интересного" and offer "Вперёд!".
     # Continue automatically to the next fork.
     pos_forward = _find_pos_by_substring(msg, "впер")
