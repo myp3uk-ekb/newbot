@@ -369,16 +369,15 @@ async def _use_preferred_dungeon_buffs(client: TelegramClient, *, reason: str, f
     for item_cmd, patterns in plan:
         await _human_sleep(kind="inventory", lo=0.9, hi=1.9, note=f"buff {item_cmd}")
         await client.send_message(CFG.game_chat, item_cmd)
-        # "Фрукт богатства" открывает карточку предмета и требует отдельного клика "Использовать".
-        # Для остальных расходников в большинстве случаев хватает отправки /i_N.
-        if any("фрукт богатства" in _norm_item_name(p) for p in patterns):
-            try:
-                await asyncio.sleep(0.9)
-                m = await _get_recent_bot_message_with_buttons(client, CFG.game_chat, limit=8)
-                if m is not None:
-                    await click_button_contains(client, m, ["использовать", "▶️ использовать", "▶ использовать"])
-            except Exception as e:
-                log.warning("🧪 fruit-use click failed for %s: %s", item_cmd, e)
+        # В текущем UI карточку предмета часто нужно подтверждать кликом "Использовать"
+        # (не только для фрукта богатства). Пытаемся нажать кнопку для всех бафов.
+        try:
+            await asyncio.sleep(0.9)
+            m = await _get_recent_bot_message_with_buttons(client, CFG.game_chat, limit=10)
+            if m is not None:
+                await click_button_contains(client, m, ["использовать", "▶️ использовать", "▶ использовать"])
+        except Exception as e:
+            log.warning("🧪 buff-use click failed for %s: %s", item_cmd, e)
         used += 1
 
     _kv_set("dungeon_buffs_last_ts", f"{now:.3f}")
