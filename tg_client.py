@@ -2170,6 +2170,10 @@ async def _handle_party_event(client: TelegramClient, msg: Message, state) -> bo
             _party_enter_modes("invite_accept")
             set_party_active(True)
             set_kv("party_last_event", "invite_accept")
+            try:
+                await _use_preferred_dungeon_buffs(client, reason="party_invite_accept", force=True)
+            except Exception as e:
+                log.warning("🤝 PARTY: не удалось применить стартовые бафы: %s", e)
             return True
 
         # If we cannot click (no buttons), just mark active and wait for join msg.
@@ -2610,6 +2614,7 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
         is_fishing_or_rodflow
         or is_pet_flow_active()
         or mod_heal_enabled()
+        or is_party_active()
         or state.stage == 'post_battle'
         or state.human_ctx == 'hp_query'
     )
@@ -2679,7 +2684,7 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
 
     # /forest off should stop ONLY лес/боёвка (вылазки, нападения, големы),
     # but must NOT block вспомогательные режимы (петы, лечение, рыбалка).
-    if not mod_forest_enabled() and not (is_fishing_or_rodflow or is_pet_flow_active() or mod_heal_enabled()):
+    if not mod_forest_enabled() and not (is_fishing_or_rodflow or is_pet_flow_active() or mod_heal_enabled() or is_party_active()):
         log.info("🎛 Лес/боёвка выключены (/forest off) — ничего не нажимаю.")
         return
 
@@ -2729,7 +2734,8 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
         d = human_delay_combat("battle")
         log.info(f"⚔️ Найдена кнопка 'Напасть' → жду {d:.2f}s и атакую")
         await asyncio.sleep(d)
-        await click_button(client, msg, pos=pos_attack)
+        if not await _click_action_button_resilient(client, msg, substr="напасть", timeout_sec=4.0):
+            log.warning("⚔️ Не удалось нажать 'Напасть' после переключения E1")
         return
 
     # Lockpick flow in dungeon: switch to E3, click lock, then return to E1.
@@ -2757,6 +2763,10 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
         if t:
             labels.append(t)
     if looks_like_dungeon_prompt(txt_full, labels):
+        try:
+            await _use_preferred_dungeon_buffs(client, reason="dungeon_prompt_seen", force=False)
+        except Exception:
+            pass
         best_room = None
         best_score = -1
         for room in (1, 2, 3):
@@ -2805,7 +2815,8 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
             d = human_delay_combat("battle")
             log.info(f"➡️ Данж: жму 'Вперёд' через {d:.2f}s")
             await asyncio.sleep(d)
-            await click_button(client, msg, pos=pos_forward)
+            if not await _click_action_button_resilient(client, msg, substr="впер", timeout_sec=4.0):
+                log.warning("➡️ Не удалось нажать 'Вперёд' после переключения E2")
             return
 
     if not state.can_act or not state.buttons:
