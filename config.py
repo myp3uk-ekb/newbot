@@ -119,7 +119,7 @@ class Config(BaseModel):
 
     # LM Studio (local LLM) for dungeon decisions.
     lmstudio_base_url: str = str(os.getenv('LMSTUDIO_BASE_URL', 'http://127.0.0.1:1234/v1') or 'http://127.0.0.1:1234/v1').strip()
-    lmstudio_model: str = str(os.getenv('LMSTUDIO_MODEL', 'google/gemma-4-e4b') or 'google/gemma-4-e4b').strip()
+    lmstudio_model: str = str(os.getenv('LMSTUDIO_MODEL', 'qwen/qwen3-1.7b') or 'qwen/qwen3-1.7b').strip()
     lmstudio_timeout_sec: float = float(os.getenv('LMSTUDIO_TIMEOUT_SEC', '20'))
     lmstudio_temperature: float = float(os.getenv('LMSTUDIO_TEMPERATURE', '0.1'))
     lmstudio_max_tokens: int = int(os.getenv('LMSTUDIO_MAX_TOKENS', '80'))

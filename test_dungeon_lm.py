@@ -60,6 +60,22 @@ class DungeonLMTests(unittest.TestCase):
             )
         self.assertEqual(model, "google/gemma-4-e4b")
 
+    def test_resolve_chat_model_prefers_qwen_when_available(self):
+        models_payload = {
+            "data": [
+                {"id": "google/gemma-4-e4b"},
+                {"id": "qwen/qwen3-1.7b"},
+            ],
+            "object": "list",
+        }
+        with patch("dungeon_lm.request.urlopen", return_value=_Resp(models_payload)):
+            model = dungeon_lm.resolve_chat_model(
+                "http://127.0.0.1:1234/v1",
+                configured_model="missing-model",
+                timeout_sec=5,
+            )
+        self.assertEqual(model, "qwen/qwen3-1.7b")
+
     def test_ask_lmstudio_choice(self):
         models_payload = {
             "data": [{"id": "google/gemma-4-e4b"}],
