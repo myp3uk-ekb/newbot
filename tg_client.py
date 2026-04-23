@@ -349,6 +349,19 @@ async def _use_preferred_dungeon_buffs(client: TelegramClient, *, reason: str, f
     if not backpack:
         return False
 
+    effects_raw = await _fetch_character_effects_raw(client)
+    effects_state = _parse_effects_state(effects_raw or "")
+
+    # If negative effects are active, cleanse first to avoid wasting buff consumables.
+    if effects_state["has_negative"]:
+        cleaned = await _try_use_cleansing_potion(client, backpack=backpack)
+        if cleaned:
+            # Re-fetch snapshot so backpack commands stay fresh after using an item.
+            snap = await _fetch_character(client)
+            if not snap:
+                return True
+            backpack = snap.get("backpack", []) or []
+
     # Buff groups have long durations, so reapply by group cooldown instead of
     # spamming all consumables on every dungeon prompt.
     spec = (
@@ -362,6 +375,8 @@ async def _use_preferred_dungeon_buffs(client: TelegramClient, *, reason: str, f
 
     plan: list[tuple[str, str, list[str], int]] = []
     for group, patterns, group_cd_sec in spec:
+        if _effect_group_is_active(effects_state["active_norm"], group):
+            continue
         nxt = float(get_kv(f"dungeon_buff_next_ts:{group}", "0") or 0.0)
         if (not force) and now < nxt:
             continue
@@ -391,6 +406,131 @@ async def _use_preferred_dungeon_buffs(client: TelegramClient, *, reason: str, f
     _kv_set("dungeon_buffs_last_ts", f"{now:.3f}")
     log.info("🧪 DUNGEON/PARTY buffs applied (%s): %s item(s)", reason, used)
     return used > 0
+
+
+_FETCH_EFFECTS_LOCK = asyncio.Lock()
+_LAST_FETCH_EFFECTS_TS = 0.0
+_FETCH_EFFECTS_MIN_INTERVAL = 2.0
+
+
+async def _fetch_character_effects_raw(client: TelegramClient, timeout: float = 15.0) -> str | None:
+    """Request /character and return raw text when "Временные эффекты" block is visible."""
+    timeout = float(timeout) if timeout is not None else 15.0
+    global _LAST_FETCH_EFFECTS_TS
+    async with _FETCH_EFFECTS_LOCK:
+        now = time.time()
+        delta = now - _LAST_FETCH_EFFECTS_TS
+        if delta < _FETCH_EFFECTS_MIN_INTERVAL:
+            await asyncio.sleep(_FETCH_EFFECTS_MIN_INTERVAL - delta)
+        _LAST_FETCH_EFFECTS_TS = time.time()
+
+        await asyncio.sleep(human_delay_cmd("inventory"))
+        await client.send_message(CFG.game_chat, "/character")
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout
+
+        def _looks_like_character_dump(txt: str) -> bool:
+            t = _normalize_ru(txt)
+            return ("временные эффекты" in t) and ("/character" in t or "боевой рейтинг" in t)
+
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return None
+            try:
+                fut = asyncio.get_running_loop().create_future()
+
+                async def _tmp_handler(e):
+                    if not fut.done():
+                        fut.set_result(e)
+
+                tmp_event = events.NewMessage(chats=CFG.game_chat)
+                client.add_event_handler(_tmp_handler, tmp_event)
+                try:
+                    ev = await asyncio.wait_for(fut, timeout=remaining)
+                finally:
+                    client.remove_event_handler(_tmp_handler, tmp_event)
+            except asyncio.TimeoutError:
+                return None
+
+            txt = (ev.raw_text or "").strip()
+            if not txt:
+                continue
+            if not _looks_like_character_dump(txt):
+                continue
+            return txt
+
+
+_NEGATIVE_EFFECT_MARKERS = (
+    "-",
+    "минус",
+    "потеряшлив",
+    "мягколап",
+    "сляв",
+    "спляв",
+    "штраф",
+)
+
+_EFFECT_GROUP_MARKERS = {
+    "wealth": ("бонус 🌙", "бонус луны", "лунные лепестки"),
+    "vitality": ("живучесть", "🐋"),
+    "combat_xp": ("боевой ⚜️", "боевой опыт", "🦈"),
+    "regen": ("регенерация", "🐬"),
+    "armor": ("броня", "кожа"),
+    "power": ("атака",),
+}
+
+
+def _parse_effects_state(text: str) -> dict:
+    """Parse /character temporary effects block."""
+    low = _normalize_ru(text or "")
+    active_norm: list[str] = []
+    has_negative = False
+    in_block = False
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        norm = _normalize_ru(line)
+        if not line:
+            if in_block:
+                break
+            continue
+        if "временные эффекты" in norm:
+            in_block = True
+            continue
+        if not in_block:
+            continue
+        active_norm.append(norm)
+        if any(mark in norm for mark in _NEGATIVE_EFFECT_MARKERS):
+            has_negative = True
+    # Fallback for compact/single-line responses.
+    if (not active_norm) and ("временные эффекты" in low):
+        has_negative = any(mark in low for mark in _NEGATIVE_EFFECT_MARKERS)
+    return {"active_norm": active_norm, "has_negative": has_negative}
+
+
+def _effect_group_is_active(active_norm: list[str], group: str) -> bool:
+    markers = _EFFECT_GROUP_MARKERS.get(group) or ()
+    if not markers:
+        return False
+    return any(any(m in line for m in markers) for line in (active_norm or []))
+
+
+async def _try_use_cleansing_potion(client: TelegramClient, backpack: list[tuple[str, str]]) -> bool:
+    cmd = _find_backpack_item_cmd(backpack or [], ["зелье очищения"])
+    if not cmd:
+        log.info("🧪 debuff found, but cleansing potion is missing in backpack")
+        return False
+    await _human_sleep(kind="inventory", lo=0.8, hi=1.7, note=f"cleanse {cmd}")
+    await client.send_message(CFG.game_chat, cmd)
+    try:
+        await asyncio.sleep(0.9)
+        m = await _get_recent_bot_message_with_buttons(client, CFG.game_chat, limit=10)
+        if m is not None:
+            await click_button_contains(client, m, ["использовать", "▶️ использовать", "▶ использовать"])
+    except Exception as e:
+        log.warning("🧪 cleanse click failed for %s: %s", cmd, e)
+    log.info("🧪 debuffs detected: used cleansing potion")
+    return True
 
 
 async def _try_move_one_item_to_storage(client, chat, avoid_norms: set[str] | None = None) -> bool:
@@ -2862,7 +3002,9 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
             log.warning("⚔️ Не удалось нажать 'Напасть' после переключения E1")
         return
 
-    # Lockpick flow in dungeon: switch to E3, click lock, then return to E1.
+    # Lockpick flow in dungeon: switch to E3, click lock, then return to E2
+    # (navigation/utility). In practice chest follow-ups usually require moving
+    # forward rather than immediate combat.
     if ("взломать замок" in low_full) or (_find_pos_by_substring(msg, "взлом") is not None):
         pos_lock = _find_pos_by_substring(msg, "взлом")
         if pos_lock is not None:
@@ -2875,17 +3017,13 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
             await asyncio.sleep(d)
             await click_button(client, msg, pos=pos_lock)
             try:
-                await _send_set_command(client, 1)
+                await _send_set_command(client, 2)
             except Exception:
                 pass
             return
 
     # Dungeon room chooser (no AI): choose among 1/2/3 the room with the strongest mob.
     if looks_like_dungeon_prompt(txt_full, labels):
-        try:
-            await _use_preferred_dungeon_buffs(client, reason="dungeon_prompt_seen", force=False)
-        except Exception:
-            pass
         best_room = None
         best_score = -1
         for room in (1, 2, 3):
@@ -2920,6 +3058,61 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
                 await asyncio.sleep(d)
                 await click_button(client, msg, pos=pos_room)
                 return
+
+    # Dungeon well event:
+    # - first click "drink" when available;
+    # - then, on the follow-up message ("health restored"), there is often only one
+    #   navigation button left, and we should press it even if it's not literally "вперёд".
+    if dungeon_runtime and ("колодец" in low_full):
+        pos_drink = _find_pos_by_substring(msg, "вып")
+        if pos_drink is None:
+            pos_drink = _find_pos_by_substring(msg, "пить")
+        if pos_drink is not None:
+            try:
+                await _send_set_command(client, 2)  # E2: navigation/util
+            except Exception:
+                pass
+            d = human_delay_combat("battle")
+            log.info(f"💧 Данж: найден колодец, жму 'Выпить' через {d:.2f}s")
+            await asyncio.sleep(d)
+            await click_button(client, msg, pos=pos_drink)
+            return
+
+    if dungeon_runtime and len(state.buttons) == 1:
+        low_txt = _normalize_ru(txt_full)
+        if ("здоровье восполнено" in low_txt) or ("пьет из колодца" in low_txt):
+            try:
+                await _send_set_command(client, 2)  # E2: navigation/util
+            except Exception:
+                pass
+            d = human_delay_combat("battle")
+            only_btn = (state.buttons[0].btn_text or state.buttons[0].name or "").strip() or "<единственная>"
+            log.info("➡️💧 Данж: после колодца жму единственную кнопку '%s' через %.2fs", only_btn, d)
+            await asyncio.sleep(d)
+            await click_button(client, msg, pos=0)
+            return
+
+    # Chest follow-up often leaves a single navigation button ("Вперёд").
+    # Keep moving automatically with E2 to avoid getting stuck in utility set.
+    if dungeon_runtime and len(state.buttons) == 1:
+        low_txt = _normalize_ru(txt_full)
+        only_btn = _normalize_ru((state.buttons[0].btn_text or state.buttons[0].name or ""))
+        chest_done = (
+            ("сундук оказался" in low_txt)
+            or ("получает" in low_txt and "слот рюкзак" in low_txt)
+            or ("в сундуке" in low_txt)
+        )
+        if chest_done and ("впер" in only_btn):
+            try:
+                await _send_set_command(client, 2)  # E2: navigation/util
+            except Exception:
+                pass
+            d = human_delay_combat("battle")
+            log.info("➡️🗝️ Данж: после сундука жму единственную кнопку '%s' через %.2fs",
+                     (state.buttons[0].btn_text or state.buttons[0].name or "<единственная>"), d)
+            await asyncio.sleep(d)
+            await click_button(client, msg, pos=0)
+            return
 
     # After "Осмотреться" the game can say "ничего интересного" and offer "Вперёд!".
     # Continue automatically to the next fork.

@@ -58,7 +58,10 @@ def resolve_chat_model(base_url: str, configured_model: str, timeout_sec: float)
 
     # Prefer non-embedding models when auto-selecting.
     candidates = [m for m in models if "embedding" not in m.lower()]
-    selected = (candidates or models)[0]
+    base = (candidates or models)
+    # Prefer Qwen family if present (current default runtime model line).
+    qwen = [m for m in base if "qwen" in m.lower()]
+    selected = (qwen or base)[0]
     if configured and configured not in models:
         log.warning("🕸 LM Studio model '%s' not found; using '%s'", configured, selected)
     return selected
