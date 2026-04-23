@@ -180,9 +180,17 @@ def choose_dungeon_room_by_priority(text: str) -> int | None:
     room_tier: dict[int, int] = {}
     room_priority: dict[int, int] = {}
 
+    # Room lists can be rendered in a single line where each room block itself
+    # contains counters like "Противники: 3.". Those counters must not be
+    # mistaken for room markers ("3. ..."), so room starts are accepted only
+    # when the room body begins with common room descriptors.
+    room_body_lead = r"(?:противники|находки|пуст)"
+    room_marker = r"(?:^|\n|\s){room}\.\s*(?={lead})"
+    next_room_marker = r"(?:\n|\s)[123]\.\s*(?={lead})"
+
     for room in (1, 2, 3):
         m = re.search(
-            rf"(?:^|\n|\s){room}\.\s*(.*?)(?=(?:\n|\s)[123]\.\s|$)",
+            rf"{room_marker.format(room=room, lead=room_body_lead)}(.*?)(?={next_room_marker.format(lead=room_body_lead)}|$)",
             txt,
             re.S | re.I,
         )

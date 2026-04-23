@@ -129,6 +129,15 @@ class DungeonLMTests(unittest.TestCase):
         )
         self.assertEqual(dungeon_lm.choose_dungeon_room_by_priority(txt), 2)
 
+    def test_choose_dungeon_room_ignores_enemy_count_number_markers(self):
+        txt = (
+            "Уровень 19. Впереди три темных прохода. "
+            "1. Противники: 3. 📜Карта Находки: Сундук. 📜Карта "
+            "2. Противники: 3. 📜Карта Находки: Костер. 📜Карта "
+            "3. Противники: 3. 📜Карта Находки: Нет."
+        )
+        self.assertEqual(dungeon_lm.choose_dungeon_room_by_priority(txt), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
