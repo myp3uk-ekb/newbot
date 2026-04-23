@@ -3039,19 +3039,32 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
                 pass
             return
 
-    # Dungeon room chooser (no AI): choose among 1/2/3 the room with the strongest mob.
+    # Dungeon room chooser (no AI):
+    # - if any room has a "boss-like" enemy marker, choose the strongest one;
+    # - if no bosses are visible, prefer utility/findings route with strange plants.
     if looks_like_dungeon_prompt(txt_full, labels):
         room_blocks: dict[int, str] = {}
         best_room = None
         best_score = -1
+        room_has_boss: dict[int, bool] = {}
+        room_has_strange_plants: dict[int, bool] = {}
         for room in (1, 2, 3):
             m = re.search(rf"(?:^|\n)\s*{room}\.\s*(.*?)(?=(?:\n\s*[123]\.\s)|\Z)", txt_full, re.S | re.I)
             block = (m.group(1) if m else "") or ""
             if block.strip():
                 room_blocks[room] = block
+            low_block = _normalize_ru(block)
+            room_has_strange_plants[room] = ("странные растения" in low_block)
             pm = re.search(r"противники\s*:\s*(.*?)(?:находки\s*:|$)", block, re.S | re.I)
             pseg = (pm.group(1) if pm else block) or ""
             pseg_main = pseg.split("👁", 1)[0]
+            low_pseg = _normalize_ru(pseg_main)
+            has_boss_like = (
+                bool(re.search(r"\[(\d+)\]", pseg_main))
+                or ("⚔" in pseg_main)
+                or ("босс" in low_pseg)
+            )
+            room_has_boss[room] = has_boss_like
 
             score = 0
             cnt = re.search(r"\b(\d+)\b", pseg_main)
@@ -3069,6 +3082,14 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
             if score > best_score:
                 best_score = score
                 best_room = room
+
+        any_boss = any(room_has_boss.values())
+        if (not any_boss) and any(room_has_strange_plants.values()):
+            for room in (1, 2, 3):
+                if room_has_strange_plants.get(room):
+                    best_room = room
+                    best_score = 0
+                    break
 
         if best_room is not None:
             pos_room = _find_pos_by_substring(msg, str(best_room))
@@ -3150,6 +3171,22 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
             return
 
     # Campfire follow-up after "Осмотреться":
+    # if "Разжечь" is available, press it first.
+    if dungeon_runtime:
+        low_txt = _normalize_ru(txt_full)
+        pos_fire = _find_pos_by_substring(msg, "разж")
+        if ("это костер" in low_txt or "это костёр" in low_txt) and (pos_fire is not None):
+            try:
+                await _send_set_command(client, 2)  # E2: navigation/util
+            except Exception:
+                pass
+            d = human_delay_combat("battle")
+            log.info("🔥 Данж: у костра жму 'Разжечь' через %.2fs", d)
+            await asyncio.sleep(d)
+            await click_button(client, msg, pos=pos_fire)
+            return
+
+    # Campfire follow-up after "Разжечь":
     # once the fire is lit, the game usually leaves a single "Вперёд" button.
     # Continue automatically and make sure E2 is active for navigation.
     if dungeon_runtime and len(state.buttons) == 1:
