@@ -2910,6 +2910,39 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
                 await click_button(client, msg, pos=pos_room)
                 return
 
+    # Dungeon well event:
+    # - first click "drink" when available;
+    # - then, on the follow-up message ("health restored"), there is often only one
+    #   navigation button left, and we should press it even if it's not literally "вперёд".
+    if dungeon_runtime and ("колодец" in low_full):
+        pos_drink = _find_pos_by_substring(msg, "вып")
+        if pos_drink is None:
+            pos_drink = _find_pos_by_substring(msg, "пить")
+        if pos_drink is not None:
+            try:
+                await _send_set_command(client, 2)  # E2: navigation/util
+            except Exception:
+                pass
+            d = human_delay_combat("battle")
+            log.info(f"💧 Данж: найден колодец, жму 'Выпить' через {d:.2f}s")
+            await asyncio.sleep(d)
+            await click_button(client, msg, pos=pos_drink)
+            return
+
+    if dungeon_runtime and len(state.buttons) == 1:
+        low_txt = _normalize_ru(txt_full)
+        if ("здоровье восполнено" in low_txt) or ("пьет из колодца" in low_txt):
+            try:
+                await _send_set_command(client, 2)  # E2: navigation/util
+            except Exception:
+                pass
+            d = human_delay_combat("battle")
+            only_btn = (state.buttons[0].btn_text or state.buttons[0].name or "").strip() or "<единственная>"
+            log.info("➡️💧 Данж: после колодца жму единственную кнопку '%s' через %.2fs", only_btn, d)
+            await asyncio.sleep(d)
+            await click_button(client, msg, pos=0)
+            return
+
     # After "Осмотреться" the game can say "ничего интересного" and offer "Вперёд!".
     # Continue automatically to the next fork.
     pos_forward = _find_pos_by_substring(msg, "впер")
