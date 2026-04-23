@@ -305,41 +305,6 @@ async def _send_set_command(client: TelegramClient, set_num: int) -> None:
     await client.send_message(CFG.game_chat, f"/e_{n}")
 
 
-async def _click_action_button_resilient(
-    client: TelegramClient,
-    msg: Message,
-    *,
-    substr: str,
-    timeout_sec: float = 4.0,
-) -> bool:
-    """Click action button from current or freshly-updated message."""
-    pos = _find_pos_by_substring(msg, substr)
-    if pos is not None:
-        await click_button(client, msg, pos=pos)
-        return True
-    try:
-        fresh = await _await_recent_message(
-            client,
-            CFG.game_chat,
-            timeout=timeout_sec,
-            poll=0.6,
-            after_id=getattr(msg, "id", None),
-            predicate=lambda m: (
-                bool(getattr(m, "buttons", None))
-                and (_find_pos_by_substring(m, substr) is not None)
-            ),
-        )
-    except Exception:
-        fresh = None
-    if fresh is None:
-        return False
-    pos = _find_pos_by_substring(fresh, substr)
-    if pos is None:
-        return False
-    await click_button(client, fresh, pos=pos)
-    return True
-
-
 def _find_backpack_item_cmd(backpack: list[tuple[str, str]], patterns: list[str]) -> str | None:
     pats = [_norm_item_name(p) for p in (patterns or []) if p]
     if not pats:
@@ -384,7 +349,7 @@ async def _use_preferred_dungeon_buffs(client: TelegramClient, *, reason: str, f
     if not backpack:
         return False
 
-    plan: list[str] = []
+    plan: list[tuple[str, list[str]]] = []
     for patterns in (
         ["фрукт богатства"],
         ["огромный карась"],
@@ -395,39 +360,25 @@ async def _use_preferred_dungeon_buffs(client: TelegramClient, *, reason: str, f
     ):
         cmd = _find_backpack_item_cmd(backpack, patterns)
         if cmd:
-            plan.append(cmd)
+            plan.append((cmd, patterns))
 
     if not plan:
         return False
 
     used = 0
-    for item_cmd in plan:
+    for item_cmd, patterns in plan:
         await _human_sleep(kind="inventory", lo=0.9, hi=1.9, note=f"buff {item_cmd}")
         await client.send_message(CFG.game_chat, item_cmd)
-        # Item cards require explicit "Использовать" click.
-        await _human_sleep(kind="inventory", lo=0.6, hi=1.4, note=f"buff use {item_cmd}")
-        card = await _get_recent_bot_message_with_buttons(client, CFG.game_chat, limit=10)
-        clicked_use = False
-        if card is not None:
+        # "Фрукт богатства" открывает карточку предмета и требует отдельного клика "Использовать".
+        # Для остальных расходников в большинстве случаев хватает отправки /i_N.
+        if any("фрукт богатства" in _norm_item_name(p) for p in patterns):
             try:
-                res = await click_button_contains(client, card, ["использовать"])
-                clicked_use = bool(res)
-            except Exception:
-                clicked_use = False
-        if not clicked_use:
-            # Reply-keyboard fallback.
-            try:
-                await client.send_message(CFG.game_chat, "▶️Использовать")
-                clicked_use = True
-            except Exception:
-                try:
-                    await client.send_message(CFG.game_chat, "Использовать")
-                    clicked_use = True
-                except Exception:
-                    clicked_use = False
-        if not clicked_use:
-            log.warning("🧪 Не удалось нажать 'Использовать' для %s", item_cmd)
-            continue
+                await asyncio.sleep(0.9)
+                m = await _get_recent_bot_message_with_buttons(client, CFG.game_chat, limit=8)
+                if m is not None:
+                    await click_button_contains(client, m, ["использовать", "▶️ использовать", "▶ использовать"])
+            except Exception as e:
+                log.warning("🧪 fruit-use click failed for %s: %s", item_cmd, e)
         used += 1
 
     _kv_set("dungeon_buffs_last_ts", f"{now:.3f}")
@@ -2171,8 +2122,8 @@ async def _handle_party_event(client: TelegramClient, msg: Message, state) -> bo
 
     # --- Detect lifecycle messages (invite/join/leave/disband) ---
     is_invite = ("приглашает" in text.lower() and "групп" in text.lower())
-    # IMPORTANT: avoid false positives like "Группа вступает в бой!".
-    is_join = ("вступает в группу" in text.lower())
+    is_join = ("вступает" in text.lower() and "групп" in text.lower())
+    is_created = ("группа создана" in text.lower())
     is_disband = ("группа распущена" in text.lower())
     is_kick = ("исключается из группы" in text.lower() or "исключен из группы" in text.lower())
     is_leave = ("покидает группу" in text.lower())
@@ -2231,25 +2182,26 @@ async def _handle_party_event(client: TelegramClient, msg: Message, state) -> bo
         set_kv("party_last_event", "invite_seen")
         return True
 
-    if is_join:
-        # We are (re)joined.
+    if is_join or is_created:
+        # We are joined or a new group was created.
         if get_kv("party_snapshot_done", "0") != "1":
             _party_snapshot_modes()
             set_kv("party_snapshot_done", "1")
 
         _party_enter_modes("joined")
         set_party_active(True)
-        set_kv("party_last_event", "joined")
-        # Apply start buffs at most once in a while; never trigger in combat.
-        try:
-            now = time.time()
-            last_join_buff = float(get_kv("party_join_buffs_last_ts", "0") or 0.0)
-            if (now - last_join_buff) >= 30 * 60:
-                await _use_preferred_dungeon_buffs(client, reason="party_joined", force=True)
-                set_kv("party_join_buffs_last_ts", f"{now:.3f}")
-        except Exception as e:
-            log.warning("🤝 PARTY: не удалось применить стартовые бафы: %s", e)
-        log.info("🤝 PARTY: вступили в группу")
+        set_kv("party_last_event", "joined" if is_join else "created")
+        if get_kv("party_buffs_applied", "0") != "1":
+            try:
+                await _use_preferred_dungeon_buffs(
+                    client,
+                    reason="party_joined" if is_join else "party_created",
+                    force=True,
+                )
+                set_kv("party_buffs_applied", "1")
+            except Exception as e:
+                log.warning("🤝 PARTY: не удалось применить стартовые бафы: %s", e)
+        log.info("🤝 PARTY: %s", "вступили в группу" if is_join else "группа создана")
         return False  # no click needed
 
     if is_disband or is_kick or is_leave:
@@ -2260,6 +2212,7 @@ async def _handle_party_event(client: TelegramClient, msg: Message, state) -> bo
             set_kv("fish_stop_cast", "0")
             set_kv("fish_stop_cast_since", "0")
             set_kv("party_last_event", "ended")
+            set_kv("party_buffs_applied", "0")
             return True
         return False
 
@@ -2775,7 +2728,7 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
     pos_attack = _find_pos_by_substring(msg, "напасть")
     if pos_attack is not None:
         try:
-            await _send_set_command(client, 1)  # E1: combat set (before attack)
+            await _send_set_command(client, 1)  # E1: combat set
         except Exception:
             pass
         d = human_delay_combat("battle")
@@ -2856,7 +2809,7 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
         low_txt = _normalize_ru(txt_full)
         if ("ничего интересного" in low_txt) or ("следующей развилке" in low_txt) or ("куда пойдем" in low_txt):
             try:
-                await _send_set_command(client, 2)  # E2: torch/navigation (before forward)
+                await _send_set_command(client, 2)  # E2: torch/navigation
             except Exception:
                 pass
             d = human_delay_combat("battle")
