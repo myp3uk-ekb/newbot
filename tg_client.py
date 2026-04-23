@@ -2524,7 +2524,13 @@ async def _handle_post_battle_heal(client: TelegramClient, msg):
     force_heal = "противник одержал верх" in text.lower()
 
     async def _continue_after_battle() -> None:
-        """After heal flow, continue by pressing 'Осмотреться' (fallback: 'Вылазка')."""
+        """After heal flow, continue by pressing context action button.
+
+        Priority:
+        1) Осмотреться
+        2) Вылазка
+        3) Вперёд / Вперед
+        """
         try:
             # 1) Prefer original post-battle message (where inline buttons usually live)
             cur_msg = msg
@@ -2543,6 +2549,10 @@ async def _handle_post_battle_heal(client: TelegramClient, msg):
             if pos_v is not None:
                 await click_button(client, cur_msg, pos=pos_v)
                 return
+            pos_fwd = _find_pos_by_substring(cur_msg, "впер")
+            if pos_fwd is not None:
+                await click_button(client, cur_msg, pos=pos_fwd)
+                return
 
             # 2) Fallback: sometimes UI updates and action buttons appear on a newer message
             recent = await _await_recent_message(
@@ -2553,6 +2563,8 @@ async def _handle_post_battle_heal(client: TelegramClient, msg):
                     or (_find_pos_by_substring(m, "осмотреться") is not None)
                     or ("вылазка" in _normalize(m.message or ""))
                     or (_find_pos_by_substring(m, "вылазка") is not None)
+                    or ("впер" in _normalize(m.message or ""))
+                    or (_find_pos_by_substring(m, "впер") is not None)
                 ),
                 timeout=4.0,
                 poll=0.8,
@@ -2567,12 +2579,22 @@ async def _handle_post_battle_heal(client: TelegramClient, msg):
                 if pos_v is not None:
                     await click_button(client, recent, pos=pos_v)
                     return
+                pos_fwd = _find_pos_by_substring(recent, "впер")
+                if pos_fwd is not None:
+                    await click_button(client, recent, pos=pos_fwd)
+                    return
 
             # 3) Reply-keyboard fallback
             try:
                 await client.send_message(chat, "👀Осмотреться")
             except Exception:
-                await client.send_message(chat, "Осмотреться")
+                try:
+                    await client.send_message(chat, "Осмотреться")
+                except Exception:
+                    try:
+                        await client.send_message(chat, "🔼Вперед!")
+                    except Exception:
+                        await client.send_message(chat, "Вперед!")
         except Exception:
             pass
 
@@ -3049,7 +3071,13 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
         room_has_boss: dict[int, bool] = {}
         room_has_strange_plants: dict[int, bool] = {}
         for room in (1, 2, 3):
-            m = re.search(rf"(?:^|\n)\s*{room}\.\s*(.*?)(?=(?:\n\s*[123]\.\s)|\Z)", txt_full, re.S | re.I)
+            # Support both multiline room lists and compact single-line variants:
+            # "... 1. ... 2. ... 3. ..."
+            m = re.search(
+                rf"(?:^|\n|\s){room}\.\s*(.*?)(?=(?:\n|\s)[123]\.\s|$)",
+                txt_full,
+                re.S | re.I,
+            )
             block = (m.group(1) if m else "") or ""
             if block.strip():
                 room_blocks[room] = block
