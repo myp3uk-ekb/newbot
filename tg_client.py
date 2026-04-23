@@ -692,6 +692,34 @@ def _lmstudio_enabled() -> bool:
     return bool(getattr(CFG, "lmstudio_base_url", "").strip()) and bool(getattr(CFG, "lmstudio_model", "").strip())
 
 
+def _is_dungeon_runtime_context(text: str, buttons: list[str]) -> bool:
+    """Return True when current screen should be treated as active dungeon flow.
+
+    This is intentionally stricter than a plain "contains подзем" check so
+    informational text does not unlock combat automation.
+    """
+    low = (text or "").lower().replace("ё", "е")
+    btns = [((b or "").lower().replace("ё", "е")) for b in (buttons or [])]
+
+    explicit_dungeon_text = any(
+        marker in low
+        for marker in (
+            "ты отправляешься в подземелье",
+            "ты спускаешься в темноту",
+            "ворота захлопываются за спиной",
+            "под лапами хлюпает",
+            "взломать замок",
+        )
+    )
+    nav_or_action_btns = sum(
+        1
+        for b in btns
+        if any(k in b for k in ("осмотреть", "вперед", "вперёд", "налево", "направо", "отступ", "атак", "взлом"))
+    )
+
+    return explicit_dungeon_text or looks_like_dungeon_prompt(text, buttons) or nav_or_action_btns >= 2
+
+
 async def _handle_dungeon_with_lm(client: TelegramClient, msg: Message, state) -> bool:
     if (not mod_dungeon_enabled()) or (not _lmstudio_enabled()):
         return False
@@ -2607,6 +2635,13 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
         log.info("🎛 Рыбалка выключена (/fish off) — игнорирую рыболовные действия.")
         return
 
+    labels = []
+    for c in (state.buttons or []):
+        t = (c.btn_text or c.name or "").strip()
+        if t:
+            labels.append(t)
+    dungeon_runtime = mod_dungeon_enabled() and _is_dungeon_runtime_context(txt_full, labels)
+
     # allow_noncombat: разрешаем некоторые "служебные" флоу даже во время пауз
     # (поймать воришку, пет-флоу, хил после боя, ответ на запрос ХП и т.п.)
     allow_noncombat = (
@@ -2614,6 +2649,7 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
         or is_pet_flow_active()
         or mod_heal_enabled()
         or is_party_active()
+        or dungeon_runtime
         or state.stage == 'post_battle'
         or state.human_ctx == 'hp_query'
     )
@@ -2683,7 +2719,7 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
 
     # /forest off should stop ONLY лес/боёвка (вылазки, нападения, големы),
     # but must NOT block вспомогательные режимы (петы, лечение, рыбалка).
-    if not mod_forest_enabled() and not (is_fishing_or_rodflow or is_pet_flow_active() or mod_heal_enabled() or is_party_active()):
+    if not mod_forest_enabled() and not (is_fishing_or_rodflow or is_pet_flow_active() or mod_heal_enabled() or is_party_active() or dungeon_runtime):
         log.info("🎛 Лес/боёвка выключены (/forest off) — ничего не нажимаю.")
         return
 
@@ -2756,11 +2792,6 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
             return
 
     # Dungeon room chooser (no AI): choose among 1/2/3 the room with the strongest mob.
-    labels = []
-    for c in (state.buttons or []):
-        t = (c.btn_text or c.name or "").strip()
-        if t:
-            labels.append(t)
     if looks_like_dungeon_prompt(txt_full, labels):
         try:
             await _use_preferred_dungeon_buffs(client, reason="dungeon_prompt_seen", force=False)

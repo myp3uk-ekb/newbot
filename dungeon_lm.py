@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Iterable
 from urllib import request
 
@@ -65,16 +66,25 @@ def resolve_chat_model(base_url: str, configured_model: str, timeout_sec: float)
 
 def looks_like_dungeon_prompt(text: str, buttons: Iterable[str]) -> bool:
     low = (text or "").lower().replace("ё", "е")
-    if any(h in low for h in DUNGEON_HINTS):
-        return True
+    # Do not trigger on generic informational mentions like
+    # "Чтобы отправиться в подземелье...". We only treat text as a dungeon
+    # choice prompt when there is evidence of an immediate branching decision.
+    has_dungeon_context = any(h in low for h in DUNGEON_HINTS)
+    has_room_list = bool(re.search(r"(?:^|\n)\s*[123]\.\s+", text or "", flags=re.MULTILINE))
 
-    # Fallback heuristic when text is short/edited but buttons clearly indicate branching.
     btns = [((b or "").lower().replace("ё", "е")) for b in (buttons or [])]
     if len(btns) < 2:
         return False
+
     directional = sum(1 for b in btns if any(k in b for k in ("налево", "направо", "прямо", "дальше", "вперед", "вперёд")))
     tactical = sum(1 for b in btns if any(k in b for k in ("атак", "тихо", "осмотр", "отступ", "обойти", "открыть")))
-    return directional >= 2 or tactical >= 2
+    has_branching_buttons = directional >= 2 or tactical >= 2
+
+    if has_dungeon_context and (has_room_list or has_branching_buttons):
+        return True
+
+    # Fallback heuristic when text is short/edited but buttons clearly indicate branching.
+    return has_branching_buttons
 
 
 def _extract_choice(payload: dict) -> str | None:

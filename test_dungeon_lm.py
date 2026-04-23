@@ -28,6 +28,14 @@ class DungeonLMTests(unittest.TestCase):
             )
         )
 
+    def test_does_not_trigger_on_generic_dungeon_info_text(self):
+        self.assertFalse(
+            dungeon_lm.looks_like_dungeon_prompt(
+                "Чтобы отправиться в такое подземелье, следует выйти из группы.",
+                ["Выйти из группы", "Назад"],
+            )
+        )
+
     def test_extracts_choice_from_json_content(self):
         payload = {
             "choices": [
