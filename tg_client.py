@@ -1399,6 +1399,35 @@ def _find_pos_by_substring(msg, substr: str):
                 return (r,c)
     return None
 
+
+async def _click_action_button_resilient(client, msg, *, substr: str, timeout_sec: float = 4.0) -> bool:
+    """Click a button by substring; retry on freshly fetched keyboard while UI updates."""
+    target = _normalize_ru(substr or "")
+    if not target:
+        return False
+
+    pos = _find_pos_by_substring(msg, target)
+    if pos is not None:
+        try:
+            return bool(await click_button(client, msg, pos=pos))
+        except Exception:
+            pass
+
+    deadline = time.time() + max(0.2, float(timeout_sec or 0.0))
+    while time.time() < deadline:
+        await asyncio.sleep(0.25)
+        cur_msg = await _get_recent_bot_message_with_buttons(client, CFG.game_chat, limit=8)
+        if not cur_msg:
+            continue
+        pos = _find_pos_by_substring(cur_msg, target)
+        if pos is None:
+            continue
+        try:
+            return bool(await click_button(client, cur_msg, pos=pos))
+        except Exception:
+            continue
+    return False
+
 def _button_labels(msg):
     """Flatten Telegram inline keyboard texts (safe)."""
     try:
