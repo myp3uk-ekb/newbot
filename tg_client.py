@@ -305,6 +305,41 @@ async def _send_set_command(client: TelegramClient, set_num: int) -> None:
     await client.send_message(CFG.game_chat, f"/e_{n}")
 
 
+async def _click_action_button_resilient(
+    client: TelegramClient,
+    msg: Message,
+    *,
+    substr: str,
+    timeout_sec: float = 4.0,
+) -> bool:
+    """Click action button from current or freshly-updated message."""
+    pos = _find_pos_by_substring(msg, substr)
+    if pos is not None:
+        await click_button(client, msg, pos=pos)
+        return True
+    try:
+        fresh = await _await_recent_message(
+            client,
+            CFG.game_chat,
+            timeout=timeout_sec,
+            poll=0.6,
+            after_id=getattr(msg, "id", None),
+            predicate=lambda m: (
+                bool(getattr(m, "buttons", None))
+                and (_find_pos_by_substring(m, substr) is not None)
+            ),
+        )
+    except Exception:
+        fresh = None
+    if fresh is None:
+        return False
+    pos = _find_pos_by_substring(fresh, substr)
+    if pos is None:
+        return False
+    await click_button(client, fresh, pos=pos)
+    return True
+
+
 def _find_backpack_item_cmd(backpack: list[tuple[str, str]], patterns: list[str]) -> str | None:
     pats = [_norm_item_name(p) for p in (patterns or []) if p]
     if not pats:
@@ -369,6 +404,30 @@ async def _use_preferred_dungeon_buffs(client: TelegramClient, *, reason: str, f
     for item_cmd in plan:
         await _human_sleep(kind="inventory", lo=0.9, hi=1.9, note=f"buff {item_cmd}")
         await client.send_message(CFG.game_chat, item_cmd)
+        # Item cards require explicit "Использовать" click.
+        await _human_sleep(kind="inventory", lo=0.6, hi=1.4, note=f"buff use {item_cmd}")
+        card = await _get_recent_bot_message_with_buttons(client, CFG.game_chat, limit=10)
+        clicked_use = False
+        if card is not None:
+            try:
+                res = await click_button_contains(client, card, ["использовать"])
+                clicked_use = bool(res)
+            except Exception:
+                clicked_use = False
+        if not clicked_use:
+            # Reply-keyboard fallback.
+            try:
+                await client.send_message(CFG.game_chat, "▶️Использовать")
+                clicked_use = True
+            except Exception:
+                try:
+                    await client.send_message(CFG.game_chat, "Использовать")
+                    clicked_use = True
+                except Exception:
+                    clicked_use = False
+        if not clicked_use:
+            log.warning("🧪 Не удалось нажать 'Использовать' для %s", item_cmd)
+            continue
         used += 1
 
     _kv_set("dungeon_buffs_last_ts", f"{now:.3f}")
@@ -2112,7 +2171,8 @@ async def _handle_party_event(client: TelegramClient, msg: Message, state) -> bo
 
     # --- Detect lifecycle messages (invite/join/leave/disband) ---
     is_invite = ("приглашает" in text.lower() and "групп" in text.lower())
-    is_join = ("вступает" in text.lower() and "групп" in text.lower())
+    # IMPORTANT: avoid false positives like "Группа вступает в бой!".
+    is_join = ("вступает в группу" in text.lower())
     is_disband = ("группа распущена" in text.lower())
     is_kick = ("исключается из группы" in text.lower() or "исключен из группы" in text.lower())
     is_leave = ("покидает группу" in text.lower())
@@ -2180,8 +2240,13 @@ async def _handle_party_event(client: TelegramClient, msg: Message, state) -> bo
         _party_enter_modes("joined")
         set_party_active(True)
         set_kv("party_last_event", "joined")
+        # Apply start buffs at most once in a while; never trigger in combat.
         try:
-            await _use_preferred_dungeon_buffs(client, reason="party_joined", force=True)
+            now = time.time()
+            last_join_buff = float(get_kv("party_join_buffs_last_ts", "0") or 0.0)
+            if (now - last_join_buff) >= 30 * 60:
+                await _use_preferred_dungeon_buffs(client, reason="party_joined", force=True)
+                set_kv("party_join_buffs_last_ts", f"{now:.3f}")
         except Exception as e:
             log.warning("🤝 PARTY: не удалось применить стартовые бафы: %s", e)
         log.info("🤝 PARTY: вступили в группу")
@@ -2596,6 +2661,7 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
         is_fishing_or_rodflow
         or is_pet_flow_active()
         or mod_heal_enabled()
+        or is_party_active()
         or state.stage == 'post_battle'
         or state.human_ctx == 'hp_query'
     )
@@ -2665,7 +2731,7 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
 
     # /forest off should stop ONLY лес/боёвка (вылазки, нападения, големы),
     # but must NOT block вспомогательные режимы (петы, лечение, рыбалка).
-    if not mod_forest_enabled() and not (is_fishing_or_rodflow or is_pet_flow_active() or mod_heal_enabled()):
+    if not mod_forest_enabled() and not (is_fishing_or_rodflow or is_pet_flow_active() or mod_heal_enabled() or is_party_active()):
         log.info("🎛 Лес/боёвка выключены (/forest off) — ничего не нажимаю.")
         return
 
@@ -2709,13 +2775,14 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
     pos_attack = _find_pos_by_substring(msg, "напасть")
     if pos_attack is not None:
         try:
-            await _send_set_command(client, 1)  # E1: combat set
+            await _send_set_command(client, 1)  # E1: combat set (before attack)
         except Exception:
             pass
         d = human_delay_combat("battle")
         log.info(f"⚔️ Найдена кнопка 'Напасть' → жду {d:.2f}s и атакую")
         await asyncio.sleep(d)
-        await click_button(client, msg, pos=pos_attack)
+        if not await _click_action_button_resilient(client, msg, substr="напасть", timeout_sec=4.0):
+            log.warning("⚔️ Не удалось нажать 'Напасть' после переключения E1")
         return
 
     # Lockpick flow in dungeon: switch to E3, click lock, then return to E1.
@@ -2789,13 +2856,14 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
         low_txt = _normalize_ru(txt_full)
         if ("ничего интересного" in low_txt) or ("следующей развилке" in low_txt) or ("куда пойдем" in low_txt):
             try:
-                await _send_set_command(client, 2)  # E2: torch/navigation
+                await _send_set_command(client, 2)  # E2: torch/navigation (before forward)
             except Exception:
                 pass
             d = human_delay_combat("battle")
             log.info(f"➡️ Данж: жму 'Вперёд' через {d:.2f}s")
             await asyncio.sleep(d)
-            await click_button(client, msg, pos=pos_forward)
+            if not await _click_action_button_resilient(client, msg, substr="впер", timeout_sec=4.0):
+                log.warning("➡️ Не удалось нажать 'Вперёд' после переключения E2")
             return
 
     if not state.can_act or not state.buttons:
