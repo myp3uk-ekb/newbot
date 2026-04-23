@@ -164,8 +164,65 @@ def ask_lmstudio_choice(
     return _extract_choice(payload)
 
 
+def choose_dungeon_room_by_priority(text: str) -> int | None:
+    """Choose dungeon room number using deterministic priority rules.
+
+    Priority:
+    1) Boss/monster room (enemy has explicit tier like [1]..[10]); pick highest tier.
+    2) Room with strange plants.
+    3) Room with alchemy table.
+    4) Room with campfire.
+    5) Room with chest.
+    6) Fallback: first parsed room.
+    """
+    txt = text or ""
+    room_blocks: dict[int, str] = {}
+    room_tier: dict[int, int] = {}
+    room_priority: dict[int, int] = {}
+
+    for room in (1, 2, 3):
+        m = re.search(
+            rf"(?:^|\n|\s){room}\.\s*(.*?)(?=(?:\n|\s)[123]\.\s|$)",
+            txt,
+            re.S | re.I,
+        )
+        block = (m.group(1) if m else "") or ""
+        if not block.strip():
+            continue
+        room_blocks[room] = block
+        low = block.lower().replace("ё", "е")
+
+        tiers = [int(x) for x in re.findall(r"\[(\d{1,2})\]", block)]
+        tier_1_10 = [t for t in tiers if 1 <= t <= 10]
+        room_tier[room] = max(tier_1_10) if tier_1_10 else 0
+
+        pri = 0
+        if "странные растения" in low:
+            pri = max(pri, 5)
+        if ("алхимическии стол" in low) or ("алхимический стол" in low):
+            pri = max(pri, 4)
+        if "костер" in low:
+            pri = max(pri, 3)
+        if "сундук" in low:
+            pri = max(pri, 2)
+        room_priority[room] = pri
+
+    if not room_blocks:
+        return None
+
+    boss_rooms = [r for r in room_blocks if room_tier.get(r, 0) > 0]
+    if boss_rooms:
+        return sorted(boss_rooms, key=lambda r: (-room_tier[r], r))[0]
+
+    best_util = sorted(room_blocks, key=lambda r: (-room_priority.get(r, 0), r))[0]
+    if room_priority.get(best_util, 0) > 0:
+        return best_util
+    return sorted(room_blocks)[0]
+
+
 __all__ = [
     "ask_lmstudio_choice",
+    "choose_dungeon_room_by_priority",
     "list_lmstudio_models",
     "looks_like_dungeon_prompt",
     "resolve_chat_model",

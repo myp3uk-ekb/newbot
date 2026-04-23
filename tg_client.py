@@ -33,7 +33,7 @@ kv = _KVShim()
 from game_parser import parse_message, is_bite_text, is_result_text, BITE_TRIGGERS, RESULT_TRIGGERS
 from strategy import Profile, choose_target
 from actions import click_button, click_button_contains
-from dungeon_lm import ask_lmstudio_choice, looks_like_dungeon_prompt
+from dungeon_lm import ask_lmstudio_choice, choose_dungeon_room_by_priority, looks_like_dungeon_prompt
 
 
 _FAQ_TEXT = 'FAQ — как пользоваться автопилотом\n\n• Запуск:\n  1) Заполни API_ID / API_HASH и прочие параметры в .env / config.py\n  2) Установи зависимости: pip install -r requirements.txt\n  3) Запусти: python main.py\n  4) Авторизуйся (код из Telegram)\n\n• Где писать команды управления:\n  Команды /pause /resume /status /help /version вводи ТОЛЬКО в «Избранном» (Saved Messages).\n  В игровой чат бот ничего управляющего не пишет.\n\n• Основные команды:\n  /pause      — пауза (рыбалка может продолжать работать, если включена)\n  /resume     — продолжить\n  /status     — текущие режимы/паузы\n  /help       — этот FAQ\n  /version    — версия сборки\n  /fishtriggers — показать активные рыболовные триггеры\n  /party on|off — включить/выключить party-режим\n  /partyhp 60 — порог HP для лечения в party-режиме\n  /blood hyst 60 95 — пороги гистерезиса blood-режима (в %)\n\n• HP-пауза:\n  Отправь в игру «хп». Бот распарсит ответ (💚: X/Y и “До полного восстановления …”) и поставит паузу на восстановление.\n\n• “Человеческие задержки”:\n  Действия (клики/экип) выполняются с рандомными паузами, чтобы меньше походить на макрос и не ломаться от лагов UI.\n\nЕсли что-то зависло:\n  1) /pause\n  2) проверь, что в игре актуальные кнопки\n  3) /resume\n  4) при необходимости перезапусти скрипт и смотри логи\n'
@@ -3062,75 +3062,26 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
             return
 
     # Dungeon room chooser (no AI):
-    # - if any room has a "boss-like" enemy marker, choose the strongest one;
-    # - if no bosses are visible, prefer utility/findings route with strange plants.
+    # 1) room with monster tier marker [1]..[10] (highest tier first),
+    # 2) strange plants,
+    # 3) alchemy table,
+    # 4) campfire,
+    # 5) chest,
+    # 6) fallback to first room.
     if looks_like_dungeon_prompt(txt_full, labels):
-        room_blocks: dict[int, str] = {}
-        best_room = None
-        best_score = -1
-        room_has_boss: dict[int, bool] = {}
-        room_has_strange_plants: dict[int, bool] = {}
-        for room in (1, 2, 3):
-            # Support both multiline room lists and compact single-line variants:
-            # "... 1. ... 2. ... 3. ..."
-            m = re.search(
-                rf"(?:^|\n|\s){room}\.\s*(.*?)(?=(?:\n|\s)[123]\.\s|$)",
-                txt_full,
-                re.S | re.I,
-            )
-            block = (m.group(1) if m else "") or ""
-            if block.strip():
-                room_blocks[room] = block
-            low_block = _normalize_ru(block)
-            room_has_strange_plants[room] = ("странные растения" in low_block)
-            pm = re.search(r"противники\s*:\s*(.*?)(?:находки\s*:|$)", block, re.S | re.I)
-            pseg = (pm.group(1) if pm else block) or ""
-            pseg_main = pseg.split("👁", 1)[0]
-            low_pseg = _normalize_ru(pseg_main)
-            has_boss_like = (
-                bool(re.search(r"\[(\d+)\]", pseg_main))
-                or ("⚔" in pseg_main)
-                or ("босс" in low_pseg)
-            )
-            room_has_boss[room] = has_boss_like
-
-            score = 0
-            cnt = re.search(r"\b(\d+)\b", pseg_main)
-            if cnt:
-                try:
-                    score += int(cnt.group(1)) * 10
-                except Exception:
-                    pass
-            tiers = [int(x) for x in re.findall(r"\[(\d+)\]", pseg_main)]
-            if tiers:
-                score += max(tiers) * 100
-            if "⚔" in pseg_main:
-                score += 30
-
-            if score > best_score:
-                best_score = score
-                best_room = room
-
-        any_boss = any(room_has_boss.values())
-        if (not any_boss) and any(room_has_strange_plants.values()):
-            for room in (1, 2, 3):
-                if room_has_strange_plants.get(room):
-                    best_room = room
-                    best_score = 0
-                    break
-
+        best_room = choose_dungeon_room_by_priority(txt_full)
         if best_room is not None:
             pos_room = _find_pos_by_substring(msg, str(best_room))
             if pos_room is not None:
                 d = human_delay_combat("battle")
-                log.info(f"🕸️ Данж: выбираю проход {best_room} (score={best_score}) через {d:.2f}s")
+                log.info(f"🕸️ Данж: выбираю проход {best_room} по приоритетам через {d:.2f}s")
                 await asyncio.sleep(d)
                 await click_button(client, msg, pos=pos_room)
                 return
             # Some dungeon screens list only one room ("1. ..."), but buttons are
             # generic navigation controls (e.g. "Вперед"), without numeric labels.
             # In that case move forward explicitly.
-            if (len(room_blocks) == 1) and (1 in room_blocks):
+            if best_room == 1:
                 pos_forward_single = _find_pos_by_substring(msg, "впер")
                 if pos_forward_single is not None:
                     try:

@@ -105,6 +105,30 @@ class DungeonLMTests(unittest.TestCase):
             )
         self.assertEqual(out, "Осмотреться")
 
+    def test_choose_dungeon_room_prefers_highest_monster_tier(self):
+        txt = (
+            "1. Противники: Крыса [3]\n"
+            "2. Противники: Босс-паук [7]\n"
+            "3. Находки: странные растения"
+        )
+        self.assertEqual(dungeon_lm.choose_dungeon_room_by_priority(txt), 2)
+
+    def test_choose_dungeon_room_prefers_plants_then_alchemy(self):
+        txt = (
+            "1. Находки: алхимический стол\n"
+            "2. Находки: странные растения\n"
+            "3. Находки: сундук"
+        )
+        self.assertEqual(dungeon_lm.choose_dungeon_room_by_priority(txt), 2)
+
+    def test_choose_dungeon_room_prefers_campfire_over_chest(self):
+        txt = (
+            "1. Находки: сундук\n"
+            "2. Находки: костёр\n"
+            "3. Пустой коридор"
+        )
+        self.assertEqual(dungeon_lm.choose_dungeon_room_by_priority(txt), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
