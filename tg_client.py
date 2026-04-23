@@ -1540,13 +1540,24 @@ def _find_pos_by_substring(msg, substr: str):
     return None
 
 
-async def _click_action_button_resilient(client, msg, *, substr: str, timeout_sec: float = 4.0) -> bool:
-    """Click a button by substring; retry on freshly fetched keyboard while UI updates."""
-    target = _normalize_ru(substr or "")
-    if not target:
-        return False
+def _find_pos_by_exact_label(msg, labels: list[str]):
+    """Find button by exact normalized label match (safe against accidental substring clicks)."""
+    if not msg.buttons:
+        return None
+    targets = {_norm_btn_label(x) for x in (labels or []) if x}
+    if not targets:
+        return None
+    for r, row in enumerate(msg.buttons):
+        for c, b in enumerate(row):
+            lbl = (getattr(b, "text", "") or "").strip()
+            if _norm_btn_label(lbl) in targets:
+                return (r, c)
+    return None
 
-    pos = _find_pos_by_substring(msg, target)
+
+async def _click_action_button_resilient(client, msg, *, labels: list[str], timeout_sec: float = 4.0) -> bool:
+    """Click only by exact normalized labels; refetch fresh keyboards while UI updates."""
+    pos = _find_pos_by_exact_label(msg, labels)
     if pos is not None:
         try:
             return bool(await click_button(client, msg, pos=pos))
@@ -1559,7 +1570,7 @@ async def _click_action_button_resilient(client, msg, *, substr: str, timeout_se
         cur_msg = await _get_recent_bot_message_with_buttons(client, CFG.game_chat, limit=8)
         if not cur_msg:
             continue
-        pos = _find_pos_by_substring(cur_msg, target)
+        pos = _find_pos_by_exact_label(cur_msg, labels)
         if pos is None:
             continue
         try:
@@ -2987,7 +2998,7 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
         d = human_delay_combat("battle")
         log.info(f"⚔️ Найдена кнопка 'Напасть' → жду {d:.2f}s и атакую")
         await asyncio.sleep(d)
-        if not await _click_action_button_resilient(client, msg, substr="напасть", timeout_sec=4.0):
+        if not await _click_action_button_resilient(client, msg, labels=["Напасть", "В бой"], timeout_sec=4.0):
             log.warning("⚔️ Не удалось нажать 'Напасть' после переключения E1")
         return
 
@@ -3116,7 +3127,7 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
             d = human_delay_combat("battle")
             log.info(f"➡️ Данж: жму 'Вперёд' через {d:.2f}s")
             await asyncio.sleep(d)
-            if not await _click_action_button_resilient(client, msg, substr="впер", timeout_sec=4.0):
+            if not await _click_action_button_resilient(client, msg, labels=["Вперёд!", "Вперед!"], timeout_sec=4.0):
                 log.warning("➡️ Не удалось нажать 'Вперёд' после переключения E2")
             return
 
