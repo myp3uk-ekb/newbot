@@ -301,8 +301,25 @@ async def _send_set_command(client: TelegramClient, set_num: int) -> None:
         return
     if n < 1 or n > 4:
         return
+    # Deduplicate rapid repeated set-switches (e.g. same logic triggered on
+    # both NewMessage and MessageEdited for the same screen update).
+    # This avoids spam like "Набор уже используется." while keeping behaviour.
+    try:
+        now = _now_ts()
+        last_n = int((_kv_get("last_set_num", "0") or "0").strip() or 0)
+        last_ts = float((_kv_get("last_set_ts", "0") or "0").strip() or 0.0)
+        if last_n == n and (now - last_ts) < 2.2:
+            _dbg_log(f"set e{n}: skip duplicate ({now - last_ts:.2f}s)")
+            return
+    except Exception:
+        pass
     await _human_sleep(kind="inventory", lo=0.7, hi=1.8, note=f"set e{n}")
     await client.send_message(CFG.game_chat, f"/e_{n}")
+    try:
+        _kv_set("last_set_num", str(n))
+        _kv_set("last_set_ts", f"{_now_ts():.3f}")
+    except Exception:
+        pass
 
 
 def _find_backpack_item_cmd(backpack: list[tuple[str, str]], patterns: list[str]) -> str | None:
@@ -3024,11 +3041,14 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
 
     # Dungeon room chooser (no AI): choose among 1/2/3 the room with the strongest mob.
     if looks_like_dungeon_prompt(txt_full, labels):
+        room_blocks: dict[int, str] = {}
         best_room = None
         best_score = -1
         for room in (1, 2, 3):
             m = re.search(rf"(?:^|\n)\s*{room}\.\s*(.*?)(?=(?:\n\s*[123]\.\s)|\Z)", txt_full, re.S | re.I)
             block = (m.group(1) if m else "") or ""
+            if block.strip():
+                room_blocks[room] = block
             pm = re.search(r"противники\s*:\s*(.*?)(?:находки\s*:|$)", block, re.S | re.I)
             pseg = (pm.group(1) if pm else block) or ""
             pseg_main = pseg.split("👁", 1)[0]
@@ -3058,6 +3078,21 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
                 await asyncio.sleep(d)
                 await click_button(client, msg, pos=pos_room)
                 return
+            # Some dungeon screens list only one room ("1. ..."), but buttons are
+            # generic navigation controls (e.g. "Вперед"), without numeric labels.
+            # In that case move forward explicitly.
+            if (len(room_blocks) == 1) and (1 in room_blocks):
+                pos_forward_single = _find_pos_by_substring(msg, "впер")
+                if pos_forward_single is not None:
+                    try:
+                        await _send_set_command(client, 2)  # E2: navigation/util
+                    except Exception:
+                        pass
+                    d = human_delay_combat("battle")
+                    log.info(f"🕸️ Данж: доступен только проход 1 → жму 'Вперёд' через {d:.2f}s")
+                    await asyncio.sleep(d)
+                    await click_button(client, msg, pos=pos_forward_single)
+                    return
 
     # Dungeon well event:
     # - first click "drink" when available;
