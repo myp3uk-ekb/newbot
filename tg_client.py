@@ -293,6 +293,99 @@ def _norm_item_name(s: str) -> str:
     return s
 
 
+async def _send_set_command(client: TelegramClient, set_num: int) -> None:
+    """Send /e_<N> set command with a small human-like delay."""
+    try:
+        n = int(set_num)
+    except Exception:
+        return
+    if n < 1 or n > 4:
+        return
+    await _human_sleep(kind="inventory", lo=0.7, hi=1.8, note=f"set e{n}")
+    await client.send_message(CFG.game_chat, f"/e_{n}")
+
+
+def _find_backpack_item_cmd(backpack: list[tuple[str, str]], patterns: list[str]) -> str | None:
+    pats = [_norm_item_name(p) for p in (patterns or []) if p]
+    if not pats:
+        return None
+    for cmd, line in (backpack or []):
+        n = _norm_item_name(line)
+        if any(p in n for p in pats):
+            return cmd
+    return None
+
+
+def _looks_like_effect_expired(text: str) -> bool:
+    low = _normalize_ru(text or "")
+    if not low:
+        return False
+    has_end = any(k in low for k in ("закончил", "истек", "истёк", "рассеял", "пропал", "закончился", "спал"))
+    if not has_end:
+        return False
+    watched = ("карас", "форел", "лосос", "кожа", "волк", "медвед", "дракон", "титан")
+    return any(w in low for w in watched)
+
+
+async def _use_preferred_dungeon_buffs(client: TelegramClient, *, reason: str, force: bool = False) -> bool:
+    """Use preferred dungeon/party consumables from inventory.
+
+    Priority requested by user:
+      fish: huge crucian/huge trout/huge salmon
+      utility: wealth fruit
+      armor: titanium skin > iron skin
+      power: dragon > bear > wolf
+    """
+    now = time.time()
+    if not force:
+        last = float(get_kv("dungeon_buffs_last_ts", "0") or 0.0)
+        if (now - last) < 25.0:
+            return False
+
+    snap = await _fetch_character(client)
+    if not snap:
+        return False
+    backpack = snap.get("backpack", []) or []
+    if not backpack:
+        return False
+
+    plan: list[tuple[str, list[str]]] = []
+    for patterns in (
+        ["фрукт богатства"],
+        ["огромный карась"],
+        ["огромная форель"],
+        ["огромный лосось"],
+        ["титановой кожи", "железной кожи"],
+        ["силы дракона", "силы медведя", "силы волка"],
+    ):
+        cmd = _find_backpack_item_cmd(backpack, patterns)
+        if cmd:
+            plan.append((cmd, patterns))
+
+    if not plan:
+        return False
+
+    used = 0
+    for item_cmd, patterns in plan:
+        await _human_sleep(kind="inventory", lo=0.9, hi=1.9, note=f"buff {item_cmd}")
+        await client.send_message(CFG.game_chat, item_cmd)
+        # "Фрукт богатства" открывает карточку предмета и требует отдельного клика "Использовать".
+        # Для остальных расходников в большинстве случаев хватает отправки /i_N.
+        if any("фрукт богатства" in _norm_item_name(p) for p in patterns):
+            try:
+                await asyncio.sleep(0.9)
+                m = await _get_recent_bot_message_with_buttons(client, CFG.game_chat, limit=8)
+                if m is not None:
+                    await click_button_contains(client, m, ["использовать", "▶️ использовать", "▶ использовать"])
+            except Exception as e:
+                log.warning("🧪 fruit-use click failed for %s: %s", item_cmd, e)
+        used += 1
+
+    _kv_set("dungeon_buffs_last_ts", f"{now:.3f}")
+    log.info("🧪 DUNGEON/PARTY buffs applied (%s): %s item(s)", reason, used)
+    return used > 0
+
+
 async def _try_move_one_item_to_storage(client, chat, avoid_norms: set[str] | None = None) -> bool:
     """Try to free 1 inventory slot by moving a low-priority item to (market) storage.
 
@@ -2030,6 +2123,7 @@ async def _handle_party_event(client: TelegramClient, msg: Message, state) -> bo
     # --- Detect lifecycle messages (invite/join/leave/disband) ---
     is_invite = ("приглашает" in text.lower() and "групп" in text.lower())
     is_join = ("вступает" in text.lower() and "групп" in text.lower())
+    is_created = ("группа создана" in text.lower())
     is_disband = ("группа распущена" in text.lower())
     is_kick = ("исключается из группы" in text.lower() or "исключен из группы" in text.lower())
     is_leave = ("покидает группу" in text.lower())
@@ -2084,16 +2178,26 @@ async def _handle_party_event(client: TelegramClient, msg: Message, state) -> bo
         set_kv("party_last_event", "invite_seen")
         return True
 
-    if is_join:
-        # We are (re)joined.
+    if is_join or is_created:
+        # We are joined or a new group was created.
         if get_kv("party_snapshot_done", "0") != "1":
             _party_snapshot_modes()
             set_kv("party_snapshot_done", "1")
 
         _party_enter_modes("joined")
         set_party_active(True)
-        set_kv("party_last_event", "joined")
-        log.info("🤝 PARTY: вступили в группу")
+        set_kv("party_last_event", "joined" if is_join else "created")
+        if get_kv("party_buffs_applied", "0") != "1":
+            try:
+                await _use_preferred_dungeon_buffs(
+                    client,
+                    reason="party_joined" if is_join else "party_created",
+                    force=True,
+                )
+                set_kv("party_buffs_applied", "1")
+            except Exception as e:
+                log.warning("🤝 PARTY: не удалось применить стартовые бафы: %s", e)
+        log.info("🤝 PARTY: %s", "вступили в группу" if is_join else "группа создана")
         return False  # no click needed
 
     if is_disband or is_kick or is_leave:
@@ -2104,6 +2208,7 @@ async def _handle_party_event(client: TelegramClient, msg: Message, state) -> bo
             set_kv("fish_stop_cast", "0")
             set_kv("fish_stop_cast_since", "0")
             set_kv("party_last_event", "ended")
+            set_kv("party_buffs_applied", "0")
             return True
         return False
 
@@ -2407,6 +2512,7 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
     txt_full = msg.message or ""
     txt = txt_full.replace("\n", " ")
     log.info(f"🧩 {kind} msg {msg.id}: {txt[:180]!r}")
+    low_full = _normalize_ru(txt_full)
 
     # Anti-spam hurry message
     m = HURRY_RE.search(txt_full)
@@ -2480,6 +2586,13 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
             return
     except Exception as e:
         log.error(f"PARTY handler error: {e}")
+
+    # Re-apply key dungeon/party buffs when game reports effect expiration.
+    try:
+        if _looks_like_effect_expired(txt_full):
+            await _use_preferred_dungeon_buffs(client, reason="effect_expired", force=False)
+    except Exception as e:
+        log.warning("🧪 buff-reapply error: %s", e)
 
 
     # Module toggles: fishing can work even when /pause is on, but can be disabled explicitly.
@@ -2609,11 +2722,33 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
     # Deterministic combat rule (no AI): if screen offers "Напасть", always press it.
     pos_attack = _find_pos_by_substring(msg, "напасть")
     if pos_attack is not None:
+        try:
+            await _send_set_command(client, 1)  # E1: combat set
+        except Exception:
+            pass
         d = human_delay_combat("battle")
         log.info(f"⚔️ Найдена кнопка 'Напасть' → жду {d:.2f}s и атакую")
         await asyncio.sleep(d)
         await click_button(client, msg, pos=pos_attack)
         return
+
+    # Lockpick flow in dungeon: switch to E3, click lock, then return to E1.
+    if ("взломать замок" in low_full) or (_find_pos_by_substring(msg, "взлом") is not None):
+        pos_lock = _find_pos_by_substring(msg, "взлом")
+        if pos_lock is not None:
+            try:
+                await _send_set_command(client, 3)  # E3: utility/lockpick set
+            except Exception:
+                pass
+            d = human_delay_combat("battle")
+            log.info(f"🗝️ Данж: переключаюсь на E3 и жму 'Взломать' через {d:.2f}s")
+            await asyncio.sleep(d)
+            await click_button(client, msg, pos=pos_lock)
+            try:
+                await _send_set_command(client, 1)
+            except Exception:
+                pass
+            return
 
     # Dungeon room chooser (no AI): choose among 1/2/3 the room with the strongest mob.
     labels = []
@@ -2663,6 +2798,10 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
     if pos_forward is not None:
         low_txt = _normalize_ru(txt_full)
         if ("ничего интересного" in low_txt) or ("следующей развилке" in low_txt) or ("куда пойдем" in low_txt):
+            try:
+                await _send_set_command(client, 2)  # E2: torch/navigation
+            except Exception:
+                pass
             d = human_delay_combat("battle")
             log.info(f"➡️ Данж: жму 'Вперёд' через {d:.2f}s")
             await asyncio.sleep(d)
