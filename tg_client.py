@@ -3089,7 +3089,7 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
             only_btn = (state.buttons[0].btn_text or state.buttons[0].name or "").strip() or "<единственная>"
             log.info("➡️💧 Данж: после колодца жму единственную кнопку '%s' через %.2fs", only_btn, d)
             await asyncio.sleep(d)
-            await click_button(client, msg, pos=0)
+            await click_button(client, msg, index=0)
             return
 
     # Chest follow-up often leaves a single navigation button ("Вперёд").
@@ -3111,7 +3111,30 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
             log.info("➡️🗝️ Данж: после сундука жму единственную кнопку '%s' через %.2fs",
                      (state.buttons[0].btn_text or state.buttons[0].name or "<единственная>"), d)
             await asyncio.sleep(d)
-            await click_button(client, msg, pos=0)
+            await click_button(client, msg, index=0)
+            return
+
+    # Campfire follow-up after "Осмотреться":
+    # once the fire is lit, the game usually leaves a single "Вперёд" button.
+    # Continue automatically and make sure E2 is active for navigation.
+    if dungeon_runtime and len(state.buttons) == 1:
+        low_txt = _normalize_ru(txt_full)
+        only_btn = _normalize_ru((state.buttons[0].btn_text or state.buttons[0].name or ""))
+        campfire_done = (
+            ("разжигает костер" in low_txt)
+            or ("разжигает костёр" in low_txt)
+            or ("можно попробовать убежать сюда" in low_txt)
+        )
+        if campfire_done and ("впер" in only_btn):
+            try:
+                await _send_set_command(client, 2)  # E2: navigation/util
+            except Exception:
+                pass
+            d = human_delay_combat("battle")
+            log.info("➡️🔥 Данж: после костра жму единственную кнопку '%s' через %.2fs",
+                     (state.buttons[0].btn_text or state.buttons[0].name or "<единственная>"), d)
+            await asyncio.sleep(d)
+            await click_button(client, msg, index=0)
             return
 
     # After "Осмотреться" the game can say "ничего интересного" and offer "Вперёд!".
