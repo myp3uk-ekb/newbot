@@ -3041,9 +3041,11 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
             log.warning("⚔️ Не удалось нажать 'Напасть' после переключения E1")
         return
 
-    # Lockpick flow in dungeon: switch to E3, click lock, then return to E2
-    # (navigation/utility). In practice chest follow-ups usually require moving
-    # forward rather than immediate combat.
+    # Lockpick flow in dungeon: switch to E3 and click lock.
+    # Do NOT switch back to E2 immediately: chest result messages can arrive
+    # while set-switch animation is still in progress, and the `/e_2` response
+    # may hide the actionable "Вперёд!" button message. We switch back in
+    # follow-up handlers right before navigation clicks.
     if ("взломать замок" in low_full) or (_find_pos_by_substring(msg, "взлом") is not None):
         pos_lock = _find_pos_by_substring(msg, "взлом")
         if pos_lock is not None:
@@ -3055,10 +3057,6 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
             log.info(f"🗝️ Данж: переключаюсь на E3 и жму 'Взломать' через {d:.2f}s")
             await asyncio.sleep(d)
             await click_button(client, msg, pos=pos_lock)
-            try:
-                await _send_set_command(client, 2)
-            except Exception:
-                pass
             return
 
     # Dungeon room chooser (no AI):
@@ -3136,6 +3134,9 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
             ("сундук оказался" in low_txt)
             or ("получает" in low_txt and "слот рюкзак" in low_txt)
             or ("в сундуке" in low_txt)
+            or ("пытается взломать сундук" in low_txt)
+            or ("замок заклинило" in low_txt)
+            or ("точно не открыть" in low_txt)
         )
         if chest_done and ("впер" in only_btn):
             try:
