@@ -3089,7 +3089,7 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
             only_btn = (state.buttons[0].btn_text or state.buttons[0].name or "").strip() or "<единственная>"
             log.info("➡️💧 Данж: после колодца жму единственную кнопку '%s' через %.2fs", only_btn, d)
             await asyncio.sleep(d)
-            await click_button(client, msg, pos=0)
+            await click_button(client, msg, index=0)
             return
 
     # Chest follow-up often leaves a single navigation button ("Вперёд").
@@ -3111,7 +3111,7 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
             log.info("➡️🗝️ Данж: после сундука жму единственную кнопку '%s' через %.2fs",
                      (state.buttons[0].btn_text or state.buttons[0].name or "<единственная>"), d)
             await asyncio.sleep(d)
-            await click_button(client, msg, pos=0)
+            await click_button(client, msg, index=0)
             return
 
     # After "Осмотреться" the game can say "ничего интересного" and offer "Вперёд!".
