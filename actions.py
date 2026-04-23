@@ -1,4 +1,4 @@
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 from telethon.tl.custom.message import Message
 from telethon import TelegramClient
 from ratelimit import human_delay_click, note_click, safe_call
@@ -16,12 +16,19 @@ async def click_button(
     client: TelegramClient,
     msg: Message,
     *,
-    pos: Optional[Tuple[int, int]] = None,
+    pos: Optional[Union[Tuple[int, int], int]] = None,
     text: Optional[str] = None,
     index: Optional[int] = None,
 ):
     await human_delay_click()
     if pos is not None:
+        # Backward compatibility: some callers may still pass a flattened index
+        # as `pos=<int>`. Treat this exactly like `index=<int>`.
+        if isinstance(pos, int):
+            note_click()
+            return await safe_call(msg.click, i=pos)
+        if not isinstance(pos, tuple) or len(pos) != 2:
+            raise TypeError("pos must be a (row, col) tuple or int index")
         i = _linear_index(msg, pos)
         note_click()
         return await safe_call(msg.click, i=i)
