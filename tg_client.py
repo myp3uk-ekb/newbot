@@ -2810,6 +2810,10 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
         if t:
             labels.append(t)
     if looks_like_dungeon_prompt(txt_full, labels):
+        try:
+            await _use_preferred_dungeon_buffs(client, reason="dungeon_prompt_seen", force=False)
+        except Exception:
+            pass
         best_room = None
         best_score = -1
         for room in (1, 2, 3):
