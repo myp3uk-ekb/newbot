@@ -2991,7 +2991,9 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
             log.warning("⚔️ Не удалось нажать 'Напасть' после переключения E1")
         return
 
-    # Lockpick flow in dungeon: switch to E3, click lock, then return to E1.
+    # Lockpick flow in dungeon: switch to E3, click lock, then return to E2
+    # (navigation/utility). In practice chest follow-ups usually require moving
+    # forward rather than immediate combat.
     if ("взломать замок" in low_full) or (_find_pos_by_substring(msg, "взлом") is not None):
         pos_lock = _find_pos_by_substring(msg, "взлом")
         if pos_lock is not None:
@@ -3004,17 +3006,13 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
             await asyncio.sleep(d)
             await click_button(client, msg, pos=pos_lock)
             try:
-                await _send_set_command(client, 1)
+                await _send_set_command(client, 2)
             except Exception:
                 pass
             return
 
     # Dungeon room chooser (no AI): choose among 1/2/3 the room with the strongest mob.
     if looks_like_dungeon_prompt(txt_full, labels):
-        try:
-            await _use_preferred_dungeon_buffs(client, reason="dungeon_prompt_seen", force=False)
-        except Exception:
-            pass
         best_room = None
         best_score = -1
         for room in (1, 2, 3):
@@ -3079,6 +3077,28 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
             d = human_delay_combat("battle")
             only_btn = (state.buttons[0].btn_text or state.buttons[0].name or "").strip() or "<единственная>"
             log.info("➡️💧 Данж: после колодца жму единственную кнопку '%s' через %.2fs", only_btn, d)
+            await asyncio.sleep(d)
+            await click_button(client, msg, pos=0)
+            return
+
+    # Chest follow-up often leaves a single navigation button ("Вперёд").
+    # Keep moving automatically with E2 to avoid getting stuck in utility set.
+    if dungeon_runtime and len(state.buttons) == 1:
+        low_txt = _normalize_ru(txt_full)
+        only_btn = _normalize_ru((state.buttons[0].btn_text or state.buttons[0].name or ""))
+        chest_done = (
+            ("сундук оказался" in low_txt)
+            or ("получает" in low_txt and "слот рюкзак" in low_txt)
+            or ("в сундуке" in low_txt)
+        )
+        if chest_done and ("впер" in only_btn):
+            try:
+                await _send_set_command(client, 2)  # E2: navigation/util
+            except Exception:
+                pass
+            d = human_delay_combat("battle")
+            log.info("➡️🗝️ Данж: после сундука жму единственную кнопку '%s' через %.2fs",
+                     (state.buttons[0].btn_text or state.buttons[0].name or "<единственная>"), d)
             await asyncio.sleep(d)
             await click_button(client, msg, pos=0)
             return
