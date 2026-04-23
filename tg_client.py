@@ -349,24 +349,31 @@ async def _use_preferred_dungeon_buffs(client: TelegramClient, *, reason: str, f
     if not backpack:
         return False
 
-    plan: list[tuple[str, list[str]]] = []
-    for patterns in (
-        ["фрукт богатства"],
-        ["огромный карась"],
-        ["огромная форель"],
-        ["огромный лосось"],
-        ["титановой кожи", "железной кожи"],
-        ["силы дракона", "силы медведя", "силы волка"],
-    ):
+    # Buff groups have long durations, so reapply by group cooldown instead of
+    # spamming all consumables on every dungeon prompt.
+    spec = (
+        ("wealth", ["фрукт богатства"], 90 * 60),
+        ("vitality", ["огромный карась"], 20 * 60),
+        ("combat_xp", ["огромная форель"], 20 * 60),
+        ("regen", ["огромный лосось"], 20 * 60),
+        ("armor", ["титановой кожи", "железной кожи"], 60 * 60),
+        ("power", ["силы дракона", "силы медведя", "силы волка"], 60 * 60),
+    )
+
+    plan: list[tuple[str, str, list[str], int]] = []
+    for group, patterns, group_cd_sec in spec:
+        nxt = float(get_kv(f"dungeon_buff_next_ts:{group}", "0") or 0.0)
+        if (not force) and now < nxt:
+            continue
         cmd = _find_backpack_item_cmd(backpack, patterns)
         if cmd:
-            plan.append((cmd, patterns))
+            plan.append((group, cmd, patterns, group_cd_sec))
 
     if not plan:
         return False
 
     used = 0
-    for item_cmd, patterns in plan:
+    for group, item_cmd, patterns, group_cd_sec in plan:
         await _human_sleep(kind="inventory", lo=0.9, hi=1.9, note=f"buff {item_cmd}")
         await client.send_message(CFG.game_chat, item_cmd)
         # В текущем UI карточку предмета часто нужно подтверждать кликом "Использовать"
@@ -379,6 +386,7 @@ async def _use_preferred_dungeon_buffs(client: TelegramClient, *, reason: str, f
         except Exception as e:
             log.warning("🧪 buff-use click failed for %s: %s", item_cmd, e)
         used += 1
+        _kv_set(f"dungeon_buff_next_ts:{group}", f"{(now + group_cd_sec):.3f}")
 
     _kv_set("dungeon_buffs_last_ts", f"{now:.3f}")
     log.info("🧪 DUNGEON/PARTY buffs applied (%s): %s item(s)", reason, used)
@@ -690,6 +698,34 @@ def mod_dungeon_enabled() -> bool:
 
 def _lmstudio_enabled() -> bool:
     return bool(getattr(CFG, "lmstudio_base_url", "").strip()) and bool(getattr(CFG, "lmstudio_model", "").strip())
+
+
+def _is_dungeon_runtime_context(text: str, buttons: list[str]) -> bool:
+    """Return True when current screen should be treated as active dungeon flow.
+
+    This is intentionally stricter than a plain "contains подзем" check so
+    informational text does not unlock combat automation.
+    """
+    low = (text or "").lower().replace("ё", "е")
+    btns = [((b or "").lower().replace("ё", "е")) for b in (buttons or [])]
+
+    explicit_dungeon_text = any(
+        marker in low
+        for marker in (
+            "ты отправляешься в подземелье",
+            "ты спускаешься в темноту",
+            "ворота захлопываются за спиной",
+            "под лапами хлюпает",
+            "взломать замок",
+        )
+    )
+    nav_or_action_btns = sum(
+        1
+        for b in btns
+        if any(k in b for k in ("осмотреть", "вперед", "вперёд", "налево", "направо", "отступ", "атак", "взлом"))
+    )
+
+    return explicit_dungeon_text or looks_like_dungeon_prompt(text, buttons) or nav_or_action_btns >= 2
 
 
 async def _handle_dungeon_with_lm(client: TelegramClient, msg: Message, state) -> bool:
@@ -2607,6 +2643,39 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
         log.info("🎛 Рыбалка выключена (/fish off) — игнорирую рыболовные действия.")
         return
 
+    labels = []
+    for c in (state.buttons or []):
+        t = (c.btn_text or c.name or "").strip()
+        if t:
+            labels.append(t)
+    low_full = _normalize_ru(txt_full)
+    now_ts = time.time()
+    run_until = float(get_kv("dungeon_run_until_ts", "0") or 0.0)
+    enter_markers = (
+        "ты отправляешься в подземелье",
+        "ты спускаешься в темноту",
+        "ворота захлопываются за спиной",
+    )
+    leave_markers = (
+        "ты выбрался из подземелья",
+        "подземелье пройдено",
+        "покидаешь подземелье",
+        "городок изумрудный холм",
+    )
+    if any(m in low_full for m in enter_markers):
+        run_until = now_ts + (30 * 60)
+        _kv_set("dungeon_run_until_ts", f"{run_until:.3f}")
+    elif any(m in low_full for m in leave_markers):
+        run_until = 0.0
+        _kv_set("dungeon_run_until_ts", "0")
+
+    dungeon_context_now = _is_dungeon_runtime_context(txt_full, labels)
+    if dungeon_context_now:
+        run_until = max(run_until, now_ts + (30 * 60))
+        _kv_set("dungeon_run_until_ts", f"{run_until:.3f}")
+
+    dungeon_runtime = mod_dungeon_enabled() and (dungeon_context_now or now_ts < run_until)
+
     # allow_noncombat: разрешаем некоторые "служебные" флоу даже во время пауз
     # (поймать воришку, пет-флоу, хил после боя, ответ на запрос ХП и т.п.)
     allow_noncombat = (
@@ -2614,6 +2683,7 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
         or is_pet_flow_active()
         or mod_heal_enabled()
         or is_party_active()
+        or dungeon_runtime
         or state.stage == 'post_battle'
         or state.human_ctx == 'hp_query'
     )
@@ -2683,7 +2753,7 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
 
     # /forest off should stop ONLY лес/боёвка (вылазки, нападения, големы),
     # but must NOT block вспомогательные режимы (петы, лечение, рыбалка).
-    if not mod_forest_enabled() and not (is_fishing_or_rodflow or is_pet_flow_active() or mod_heal_enabled() or is_party_active()):
+    if not mod_forest_enabled() and not (is_fishing_or_rodflow or is_pet_flow_active() or mod_heal_enabled() or is_party_active() or dungeon_runtime):
         log.info("🎛 Лес/боёвка выключены (/forest off) — ничего не нажимаю.")
         return
 
@@ -2723,8 +2793,23 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
         await _handle_golem_encounter(client, msg, state)
         return
 
-    # Deterministic combat rule (no AI): if screen offers "Напасть", always press it.
+    # In dungeon, prefer scouting with torch set when the room asks what to do.
+    pos_inspect = _find_pos_by_substring(msg, "осмотр")
+    if dungeon_runtime and pos_inspect is not None and (("что же делать" in low_full) or ("славная побед" in low_full)):
+        try:
+            await _send_set_command(client, 2)  # E2: torch/navigation set
+        except Exception:
+            pass
+        d = human_delay_combat("battle")
+        log.info(f"🔦 Данж: жму 'Осмотреться' через {d:.2f}s")
+        await asyncio.sleep(d)
+        await click_button(client, msg, pos=pos_inspect)
+        return
+
+    # Deterministic combat rule (no AI): if screen offers attack, always press it.
     pos_attack = _find_pos_by_substring(msg, "напасть")
+    if pos_attack is None:
+        pos_attack = _find_pos_by_substring(msg, "в бой")
     if pos_attack is not None:
         try:
             await _send_set_command(client, 1)  # E1: combat set
@@ -2756,11 +2841,6 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
             return
 
     # Dungeon room chooser (no AI): choose among 1/2/3 the room with the strongest mob.
-    labels = []
-    for c in (state.buttons or []):
-        t = (c.btn_text or c.name or "").strip()
-        if t:
-            labels.append(t)
     if looks_like_dungeon_prompt(txt_full, labels):
         try:
             await _use_preferred_dungeon_buffs(client, reason="dungeon_prompt_seen", force=False)
