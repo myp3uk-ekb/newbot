@@ -3330,6 +3330,11 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
     if is_party_active() and len(state.buttons) == 1:
         only_btn = _normalize_ru((state.buttons[0].btn_text or state.buttons[0].name or ""))
         if "впер" in only_btn:
+            try:
+                # For pure navigation in party, force E2 first.
+                await _send_set_command(client, 2)  # E2: navigation/util
+            except Exception:
+                pass
             d = human_delay_combat("battle")
             log.info("🤝➡️ PARTY: жму единственную кнопку '%s' через %.2fs",
                      (state.buttons[0].btn_text or state.buttons[0].name or "<единственная>"), d)
