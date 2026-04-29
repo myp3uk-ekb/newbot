@@ -853,6 +853,11 @@ def mod_dungeon_enabled() -> bool:
     return _kv_bool("mod_dungeon", False)
 
 
+def mod_dungeon_altar_touch_enabled() -> bool:
+    # Safer default: OFF. Touching a чужой altar can waste its last charge.
+    return _kv_bool("mod_dungeon_altar_touch", False)
+
+
 def _lmstudio_enabled() -> bool:
     return bool(getattr(CFG, "lmstudio_base_url", "").strip()) and bool(getattr(CFG, "lmstudio_model", "").strip())
 
@@ -3325,11 +3330,14 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
             return
 
     # Bastet altar event:
-    # press "Прикоснуться" when available.
+    # press "Прикоснуться" only when explicitly enabled.
     if can_drive_dungeon and dungeon_runtime:
         low_txt = _normalize_ru(txt_full)
         pos_touch = _find_pos_by_substring(msg, "прикосн")
         if (("алтар" in low_txt) or ("бастет" in low_txt)) and (pos_touch is not None):
+            if not mod_dungeon_altar_touch_enabled():
+                log.info("🐾 Данж: алтарь найден, но auto-touch выключен (mod_dungeon_altar_touch=off)")
+                return
             d = human_delay_combat("battle")
             log.info("🐾 Данж: у алтаря жму 'Прикоснуться' через %.2fs", d)
             await asyncio.sleep(d)
@@ -5250,6 +5258,7 @@ async def run():
             ("heal","mod_heal","🩹 heal"),
             ("work","mod_work","⛏️ work"),
             ("dungeon","mod_dungeon","🕸 dungeon"),
+            ("altar","mod_dungeon_altar_touch","🐾 altar_touch"),
             ("pet","mod_pet","🐾 pet"),
             ("thief","mod_thief","🦝 thief"),
         ]:
@@ -5270,6 +5279,7 @@ async def run():
                     f"/heal on|off     (сейчас: {'on' if mod_heal_enabled() else 'off'})",
                     f"/work on|off     (сейчас: {'on' if mod_work_enabled() else 'off'})",
                     f"/dungeon on|off  (сейчас: {'on' if mod_dungeon_enabled() else 'off'})",
+                    f"/altar on|off    (сейчас: {'on' if mod_dungeon_altar_touch_enabled() else 'off'})",
                     f"/driver on|off|auto (сейчас: {party_driver_mode()}, effective={'driver' if is_party_driver() else 'passive'})",
                     f"/pet on|off      (сейчас: {'on' if mod_pet_enabled() else 'off'})  interval={getattr(CFG,'pet_interval_min_hours',1)}-{getattr(CFG,'pet_interval_max_hours',2)}h",
                     f"/thief on|off    (сейчас: {'on' if mod_thief_enabled() else 'off'})",
