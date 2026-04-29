@@ -2864,11 +2864,8 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
                 last_party_cmd_ts = 0.0
             now_go = time.time()
             if (now_go - last_party_cmd_ts) > 8.0:
-                go_delay = random.uniform(2.0, 4.0)
-                log.info("🤝🧭 PARTY: chat-триггер 'Go/Го' → жду %.2fs перед /party", go_delay)
-                await asyncio.sleep(go_delay)
                 await client.send_message(CFG.game_chat, "/party")
-                _kv_set("party_go_last_party_cmd_ts", f"{time.time():.3f}")
+                _kv_set("party_go_last_party_cmd_ts", f"{now_go:.3f}")
             log.info("🤝🧭 PARTY: поймал chat-триггер 'Go/Го' → отправил /party и временно разрешаю 'Осмотреться'")
 
     # Anti-spam hurry message
@@ -3325,6 +3322,29 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
             await click_button(client, msg, pos=pos_try)
             return
 
+    # Alchemy result follow-up:
+    # after trying the table, game often leaves a single "Вперёд" button.
+    if can_drive_dungeon and dungeon_runtime and len(state.buttons) == 1:
+        low_txt = _normalize_ru(txt_full)
+        only_btn = _normalize_ru((state.buttons[0].btn_text or state.buttons[0].name or ""))
+        alchemy_done = (
+            ("принюхивается к колбам" in low_txt)
+            or ("полезных ингредиентов" in low_txt)
+            or ("быстро смешав" in low_txt)
+            or ("алхимическ" in low_txt and "убирает" in low_txt and "рюкзак" in low_txt)
+        )
+        if alchemy_done and ("впер" in only_btn):
+            try:
+                await _send_set_command(client, 2)  # E2: navigation/util
+            except Exception:
+                pass
+            d = human_delay_combat("battle")
+            log.info("➡️🧪 Данж: после алхимического стола жму единственную кнопку '%s' через %.2fs",
+                     (state.buttons[0].btn_text or state.buttons[0].name or "<единственная>"), d)
+            await asyncio.sleep(d)
+            await click_button(client, msg, index=0)
+            return
+
     # Strange plants event:
     # equip utility set (E3) and press "Собрать".
     if can_drive_dungeon and dungeon_runtime:
@@ -3356,49 +3376,17 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
             await click_button(client, msg, pos=pos_touch)
             return
 
-    # Blocked/boarded passage event:
-    # wait up to 60s in "boarded passage" rooms, then continue forward (E2 + forward).
+    # Blocked passage / rubble event:
+    # press "Разобрать" when available.
     if can_drive_dungeon and dungeon_runtime:
         low_txt = _normalize_ru(txt_full)
-        pos_forward_local = _find_pos_by_substring(msg, "впер")
-        boarded_room = ("заколочен" in low_txt) or ("заколоченный проход" in low_txt)
-        wait_key = "dungeon_boarded_wait_until_ts"
-        now_ts = _now_ts()
-
-        if boarded_room:
-            wait_until = float(get_kv(wait_key, "0") or 0.0)
-            if wait_until <= now_ts:
-                wait_until = now_ts + 60.0
-                _kv_set(wait_key, f"{wait_until:.3f}")
-                log.info("🪓 Данж: заколоченный проход, старт паузы 60s")
-
-            left = max(0.0, wait_until - now_ts)
-            if left > 0 and pos_forward_local is not None:
-                log.info("🪓 Данж: жду разбор прохода, осталось %.1fs", left)
-                return
-
-            if pos_forward_local is not None:
-                try:
-                    await _send_set_command(client, 2)  # E2: navigation/util
-                except Exception:
-                    pass
-                d = human_delay_combat("battle")
-                log.info("➡️ Данж: пауза у прохода завершена, жму 'Вперёд' через %.2fs", d)
-                await asyncio.sleep(d)
-                await click_button(client, msg, pos=pos_forward_local)
-                _kv_set(wait_key, "0")
-                return
-
-        # If we observe chopping/mining actions or "barrier was cleared" text,
-        # drop waiting state and let generic forward handlers continue.
-        if (
-            ("разрубает баррикаду" in low_txt)
-            or ("ничего другого за ней не оказалось" in low_txt)
-            or ("проход прорублен" in low_txt)
-        ):
-            if float(get_kv(wait_key, "0") or 0.0) > 0.0:
-                _kv_set(wait_key, "0")
-                log.info("🪓 Данж: проход разобран, снимаю ожидание")
+        pos_mine = _find_pos_by_substring(msg, "разобрат")
+        if (("каменный завал" in low_txt) or ("завал" in low_txt)) and (pos_mine is not None):
+            d = human_delay_combat("battle")
+            log.info("⛏️ Данж: у завала жму 'Разобрать' через %.2fs", d)
+            await asyncio.sleep(d)
+            await click_button(client, msg, pos=pos_mine)
+            return
 
     # After "Осмотреться" the game can say "ничего интересного" and offer "Вперёд!".
     # Continue automatically to the next fork.
