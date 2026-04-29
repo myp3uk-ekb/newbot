@@ -2864,8 +2864,11 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
                 last_party_cmd_ts = 0.0
             now_go = time.time()
             if (now_go - last_party_cmd_ts) > 8.0:
+                go_delay = random.uniform(2.0, 4.0)
+                log.info("🤝🧭 PARTY: chat-триггер 'Go/Го' → жду %.2fs перед /party", go_delay)
+                await asyncio.sleep(go_delay)
                 await client.send_message(CFG.game_chat, "/party")
-                _kv_set("party_go_last_party_cmd_ts", f"{now_go:.3f}")
+                _kv_set("party_go_last_party_cmd_ts", f"{time.time():.3f}")
             log.info("🤝🧭 PARTY: поймал chat-триггер 'Go/Го' → отправил /party и временно разрешаю 'Осмотреться'")
 
     # Anti-spam hurry message
@@ -3125,6 +3128,15 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
             pass
         d = human_delay_combat("battle")
         log.info(f"🔦 Данж: жму 'Осмотреться' через {d:.2f}s")
+        await asyncio.sleep(d)
+        await click_button(client, msg, pos=pos_inspect)
+        return
+
+    # Party "Go/Го" nudge: when /party screen is open and "Осмотреться" is visible,
+    # press it with a human-like delay so the run continues.
+    if go_hint_active and is_party_screen and pos_inspect is not None:
+        d = random.uniform(2.0, 4.0)
+        log.info("🤝🧭 PARTY: на экране группы жму 'Осмотреться' через %.2fs", d)
         await asyncio.sleep(d)
         await click_button(client, msg, pos=pos_inspect)
         return
