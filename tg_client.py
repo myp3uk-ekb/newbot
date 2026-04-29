@@ -3644,11 +3644,16 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
             d = human_delay_combat("battle")
             log.info("✅ Данж: нажимаю 'Завершить' через %.2fs", d)
             await asyncio.sleep(d)
-            if await click_button(client, msg, pos=pos_finish):
+            pressed = await click_button(client, msg, pos=pos_finish)
+            if not pressed:
+                pressed = await _click_action_button_resilient(client, msg, labels=["✅Завершить", "Завершить"], timeout_sec=4.0)
+            if pressed:
                 _kv_set("dungeon_run_until_ts", "0")
                 _kv_set("dungeon_postcheck_pending", "1")
                 await _human_sleep(kind="mode_switch", lo=1.0, hi=2.4, note="dungeon finish -> /inventory")
                 await client.send_message(CFG.game_chat, "/inventory")
+            else:
+                log.warning("✅ Данж: не удалось нажать 'Завершить' (inline/reply)")
             return
 
     if not state.can_act or not state.buttons:
