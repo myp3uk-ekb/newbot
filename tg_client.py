@@ -3569,10 +3569,11 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
             return
 
     # Blocked/boarded passage event:
-    # wait up to 60s in "boarded passage" rooms, then continue forward (E2 + forward).
+    # wait up to 15s in "boarded passage" rooms, then continue forward (E2 + forward).
     if can_drive_dungeon and dungeon_runtime:
         low_txt = _normalize_ru(txt_full)
         pos_forward_local = _find_pos_by_substring(msg, "впер")
+        pos_chop_local = _find_pos_by_substring(msg, "проруб")
         boarded_room = ("заколочен" in low_txt) or ("заколоченный проход" in low_txt)
         wait_key = "dungeon_boarded_wait_until_ts"
         now_ts = _now_ts()
@@ -3580,14 +3581,21 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
         if boarded_room:
             wait_until = float(get_kv(wait_key, "0") or 0.0)
             if wait_until <= now_ts:
-                wait_until = now_ts + 60.0
+                wait_until = now_ts + 15.0
                 _kv_set(wait_key, f"{wait_until:.3f}")
-                log.info("🪓 Данж: заколоченный проход, старт паузы 60s")
+                log.info("🪓 Данж: заколоченный проход, старт паузы 15s")
 
             left = max(0.0, wait_until - now_ts)
-            if left > 0 and pos_forward_local is not None:
-                log.info("🪓 Данж: жду разбор прохода, осталось %.1fs", left)
-                return
+            if left > 0:
+                if pos_chop_local is not None:
+                    d = human_delay_combat("battle")
+                    log.info("🪓 Данж: жму 'Прорубить' через %.2fs (до авто-движения %.1fs)", d, left)
+                    await asyncio.sleep(d)
+                    await click_button(client, msg, pos=pos_chop_local)
+                    return
+                if pos_forward_local is not None:
+                    log.info("🪓 Данж: жду разбор прохода, осталось %.1fs", left)
+                    return
 
             if pos_forward_local is not None:
                 try:
@@ -4916,17 +4924,25 @@ async def mode_manager_loop(client: TelegramClient):
                 except Exception:
                     last_party_kick = 0.0
                 if stale_party and (now - last_party_kick) > 180.0:
-                    log.info("🤝⏱️ PARTY: тишина >3м → отправляю /party и 'Осмотреться'")
+                    log.info("🤝⏱️ PARTY: тишина >3м → отправляю /party и жму кнопку 'Осмотреться' (без текста)")
                     try:
                         await asyncio.sleep(human_delay_cmd("mode_switch"))
                         await client.send_message(CFG.game_chat, "/party")
                         await asyncio.sleep(human_delay_cmd("battle"))
-                        await client.send_message(CFG.game_chat, "👀Осмотреться")
+
+                        recent = await _await_recent_message(
+                            client,
+                            CFG.game_chat,
+                            predicate=lambda m: _find_pos_by_substring(m, "осмотреться") is not None,
+                            timeout=4.0,
+                            poll=0.7,
+                        )
+                        if recent is not None:
+                            pos_look = _find_pos_by_substring(recent, "осмотреться")
+                            if pos_look is not None:
+                                await click_button(client, recent, pos=pos_look)
                     except Exception:
-                        try:
-                            await client.send_message(CFG.game_chat, "Осмотреться")
-                        except Exception:
-                            pass
+                        pass
                     _kv_set("party_idle_kick_ts", str(now))
                     await asyncio.sleep(5.0)
                     continue
