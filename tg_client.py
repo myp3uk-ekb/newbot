@@ -3129,6 +3129,15 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
         await click_button(client, msg, pos=pos_inspect)
         return
 
+    # Party "Go/Го" nudge: when /party screen is open and "Осмотреться" is visible,
+    # press it with a human-like delay so the run continues.
+    if go_hint_active and is_party_screen and pos_inspect is not None:
+        d = random.uniform(2.0, 4.0)
+        log.info("🤝🧭 PARTY: на экране группы жму 'Осмотреться' через %.2fs", d)
+        await asyncio.sleep(d)
+        await click_button(client, msg, pos=pos_inspect)
+        return
+
     # Deterministic combat rule (no AI): if screen offers attack, always press it.
     pos_attack = _find_pos_by_substring(msg, "напасть")
     if pos_attack is None:
