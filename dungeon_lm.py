@@ -169,24 +169,25 @@ def choose_dungeon_room_by_priority(text: str) -> int | None:
 
     Priority:
     1) Boss/monster room (enemy has explicit tier like [1]..[10]); pick highest tier.
-    2) Room with strange plants.
-    3) Room with alchemy table.
-    4) Room with campfire.
-    5) Room with chest.
-    6) Fallback: first parsed room.
+    2) Utility rooms: strange plants / chest / altar-statue (same priority).
+       Tie-breaker: where more guards/enemies are visible.
+    3) If no boss and no utility room: pick by visible enemy/guard count.
+    4) Unknown enemy info is preferred over explicitly empty room.
+    5) Fallback: first parsed room.
     """
     txt = text or ""
     room_blocks: dict[int, str] = {}
     room_tier: dict[int, int] = {}
     room_priority: dict[int, int] = {}
+    room_enemy_count: dict[int, int] = {}
 
     # Room lists can be rendered in a single line where each room block itself
     # contains counters like "Противники: 3.". Those counters must not be
     # mistaken for room markers ("3. ..."), so room starts are accepted only
     # when the room body begins with common room descriptors.
     room_body_lead = r"(?:противники|находки|пуст)"
-    room_marker = r"(?:^|\n|\s){room}\.\s*(?={lead})"
-    next_room_marker = r"(?:\n|\s)[123]\.\s*(?={lead})"
+    room_marker = r"(?:^|\n|\s)(?<!:\s){room}\.\s*(?={lead})"
+    next_room_marker = r"(?:\n|\s)(?<!:\s)[123]\.\s*(?={lead})"
 
     for room in (1, 2, 3):
         m = re.search(
@@ -204,15 +205,29 @@ def choose_dungeon_room_by_priority(text: str) -> int | None:
         tier_1_10 = [t for t in tiers if 1 <= t <= 10]
         room_tier[room] = max(tier_1_10) if tier_1_10 else 0
 
+        # Enemy/guard count heuristic:
+        # - explicit number after "Противники:" => that number
+        # - "Противники: Нет" => -1 (known empty)
+        # - otherwise => 0 (unknown)
+        ec = 0
+        m_cnt = re.search(r"противники:\s*(\d+)", low)
+        if m_cnt:
+            ec = int(m_cnt.group(1))
+        elif "противники: нет" in low:
+            ec = -1
+        room_enemy_count[room] = ec
+
         pri = 0
         if "странные растения" in low:
+            pri = max(pri, 5)
+        if "сундук" in low:
+            pri = max(pri, 5)
+        if "алтар" in low or "стату" in low:
             pri = max(pri, 5)
         if ("алхимическии стол" in low) or ("алхимический стол" in low):
             pri = max(pri, 4)
         if "костер" in low:
             pri = max(pri, 3)
-        if "сундук" in low:
-            pri = max(pri, 2)
         room_priority[room] = pri
 
     if not room_blocks:
@@ -222,10 +237,18 @@ def choose_dungeon_room_by_priority(text: str) -> int | None:
     if boss_rooms:
         return sorted(boss_rooms, key=lambda r: (-room_tier[r], r))[0]
 
-    best_util = sorted(room_blocks, key=lambda r: (-room_priority.get(r, 0), r))[0]
+    best_util = sorted(
+        room_blocks,
+        key=lambda r: (
+            -room_priority.get(r, 0),
+            -room_enemy_count.get(r, 0),
+            r,
+        ),
+    )[0]
     if room_priority.get(best_util, 0) > 0:
         return best_util
-    return sorted(room_blocks)[0]
+    best_by_enemies = sorted(room_blocks, key=lambda r: (-room_enemy_count.get(r, 0), r))[0]
+    return best_by_enemies
 
 
 __all__ = [
