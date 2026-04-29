@@ -3540,12 +3540,27 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
         pos_forward_local = _find_pos_by_substring(msg, "впер")
         is_altar_room = (("алтар" in low_txt) or ("бастет" in low_txt))
         is_altar_1000 = ("тысячелап" in low_txt)
+        # If altar wait was started on a previous message, it may expire on a
+        # later message that no longer contains altar text. Complete the pause
+        # as soon as any forward button appears.
+        wait_key = "dungeon_altar_wait_until_ts"
+        now_ts = _now_ts()
+        wait_until_global = float(get_kv(wait_key, "0") or 0.0)
+        if (wait_until_global > 0.0) and (now_ts >= wait_until_global) and (pos_forward_local is not None):
+            try:
+                await _send_set_command(client, 2)  # E2: navigation/util
+            except Exception:
+                pass
+            d = human_delay_combat("battle")
+            log.info("➡️ Данж: пауза у алтаря истекла на следующем экране, жму 'Вперёд' через %.2fs", d)
+            await asyncio.sleep(d)
+            await click_button(client, msg, pos=pos_forward_local)
+            _kv_set(wait_key, "0")
+            return
         if is_altar_room and (pos_touch is not None):
             allow_touch = mod_dungeon_altar_1000_touch_enabled() if is_altar_1000 else mod_dungeon_altar_touch_enabled()
             wait_seconds = 10.0 if is_altar_1000 else 15.0
             if not allow_touch:
-                wait_key = "dungeon_altar_wait_until_ts"
-                now_ts = _now_ts()
                 wait_until = float(get_kv(wait_key, "0") or 0.0)
                 if wait_until <= now_ts:
                     wait_until = now_ts + wait_seconds
