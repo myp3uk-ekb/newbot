@@ -113,19 +113,35 @@ class DungeonLMTests(unittest.TestCase):
         )
         self.assertEqual(dungeon_lm.choose_dungeon_room_by_priority(txt), 2)
 
-    def test_choose_dungeon_room_prefers_plants_then_alchemy(self):
+    def test_choose_dungeon_room_prefers_plants_or_chest_with_enemy_tiebreak(self):
         txt = (
-            "1. Находки: алхимический стол\n"
-            "2. Находки: странные растения\n"
-            "3. Находки: сундук"
+            "1. Противники: 1. Находки: сундук\n"
+            "2. Противники: 4. Находки: странные растения\n"
+            "3. Противники: 2. Находки: алхимический стол"
         )
         self.assertEqual(dungeon_lm.choose_dungeon_room_by_priority(txt), 2)
 
-    def test_choose_dungeon_room_prefers_campfire_over_chest(self):
+    def test_choose_dungeon_room_prefers_chest_over_campfire(self):
         txt = (
             "1. Находки: сундук\n"
             "2. Находки: костёр\n"
             "3. Пустой коридор"
+        )
+        self.assertEqual(dungeon_lm.choose_dungeon_room_by_priority(txt), 1)
+
+    def test_choose_dungeon_room_prefers_more_enemies_when_no_boss_and_no_utility(self):
+        txt = (
+            "1. Противники: 2. Находки: Нет.\n"
+            "2. Противники: 6. Находки: Нет.\n"
+            "3. Противники: 1. Находки: Нет."
+        )
+        self.assertEqual(dungeon_lm.choose_dungeon_room_by_priority(txt), 2)
+
+    def test_choose_dungeon_room_prefers_unknown_over_explicit_empty(self):
+        txt = (
+            "1. Противники: Нет. Находки: Нет.\n"
+            "2. Противники: ???. Находки: Нет.\n"
+            "3. Противники: Нет. Находки: Нет."
         )
         self.assertEqual(dungeon_lm.choose_dungeon_room_by_priority(txt), 2)
 
@@ -136,7 +152,7 @@ class DungeonLMTests(unittest.TestCase):
             "2. Противники: 3. 📜Карта Находки: Костер. 📜Карта "
             "3. Противники: 3. 📜Карта Находки: Нет."
         )
-        self.assertEqual(dungeon_lm.choose_dungeon_room_by_priority(txt), 2)
+        self.assertEqual(dungeon_lm.choose_dungeon_room_by_priority(txt), 1)
 
 
 if __name__ == "__main__":
