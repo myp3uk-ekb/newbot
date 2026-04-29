@@ -68,6 +68,9 @@ class Config(BaseModel):
     mod_auto_switch_enabled: bool = os.getenv('MOD_AUTO_SWITCH_ENABLED', os.getenv('AUTOSWITCH_ENABLED', '1')).lower() in ('1','true','yes','on')
     mod_work_enabled: bool = os.getenv('MOD_WORK_ENABLED', os.getenv('WORK_ENABLED', '0')).lower() in ('1','true','yes','on')
     mod_dungeon_enabled: bool = os.getenv('MOD_DUNGEON_ENABLED', os.getenv('DUNGEON_ENABLED', '0')).lower() in ('1','true','yes','on')
+    # Character race for race-specific dungeon altar interactions.
+    # Supported values (case-insensitive): fox, raccoon, lynx
+    dungeon_race: str = str(os.getenv('DUNGEON_RACE', '') or '').strip().lower()
 
     # Party / Group
     # Accept invites, run pre-dungeon buff routine, and manage party lifecycle.

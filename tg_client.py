@@ -3546,14 +3546,22 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
             await click_button(client, msg, pos=pos_collect)
             return
 
-    # Bastet altar event:
-    # press "Прикоснуться" only when explicitly enabled.
+    # Race altars event:
+    # touch only "your" altar (by configured race), otherwise wait 10s and continue.
     if can_drive_dungeon and dungeon_runtime:
         low_txt = _normalize_ru(txt_full)
         pos_touch = _find_pos_by_substring(msg, "прикосн")
         pos_forward_local = _find_pos_by_substring(msg, "впер")
-        is_altar_room = (("алтар" in low_txt) or ("бастет" in low_txt))
+        is_altar_room = (("алтар" in low_txt) or ("бастет" in low_txt) or ("инари" in low_txt) or ("тануки" in low_txt))
         is_altar_1000 = ("тысячелап" in low_txt)
+        altar_race = None
+        if ("инари" in low_txt) or ("наве" in low_txt) or ("для лис" in low_txt):
+            altar_race = "fox"
+        elif ("тануки" in low_txt) or ("для енот" in low_txt):
+            altar_race = "raccoon"
+        elif ("бастет" in low_txt) or ("для рыс" in low_txt):
+            altar_race = "lynx"
+        my_race = (getattr(CFG, "dungeon_race", "") or "").strip().lower()
         # If altar wait was started on a previous message, it may expire on a
         # later message that no longer contains altar text. Complete the pause
         # as soon as any forward button appears.
@@ -3572,15 +3580,19 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
             _kv_set(wait_key, "0")
             return
         if is_altar_room and (pos_touch is not None):
-            allow_touch = mod_dungeon_altar_1000_touch_enabled() if is_altar_1000 else mod_dungeon_altar_touch_enabled()
-            wait_seconds = 10.0 if is_altar_1000 else 15.0
+            race_known = my_race in ("fox", "raccoon", "lynx")
+            race_match = bool(race_known and altar_race and (my_race == altar_race))
+            # Backward-compatible fallback:
+            # if race is unknown or altar race can't be inferred, use legacy switches.
+            allow_touch = race_match or (not race_known) or (not altar_race and (mod_dungeon_altar_1000_touch_enabled() if is_altar_1000 else mod_dungeon_altar_touch_enabled()))
+            wait_seconds = 10.0
             if not allow_touch:
                 wait_until = float(get_kv(wait_key, "0") or 0.0)
                 if wait_until <= now_ts:
                     wait_until = now_ts + wait_seconds
                     _kv_set(wait_key, f"{wait_until:.3f}")
-                    altar_name = "Тысячелапого" if is_altar_1000 else "обычный"
-                    log.info("🐾 Данж: алтарь %s, auto-touch=off → жду %.0fs перед 'Вперёд'", altar_name, wait_seconds)
+                    altar_name = "Тысячелапого" if is_altar_1000 else (altar_race or "чужой")
+                    log.info("🐾 Данж: алтарь %s не по расе (%s) → жду %.0fs перед 'Вперёд'", altar_name, my_race or "unknown", wait_seconds)
 
                 left = max(0.0, wait_until - now_ts)
                 if left > 0 and pos_forward_local is not None:
@@ -3600,12 +3612,12 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
                     return
 
                 if is_altar_1000:
-                    log.info("🐾 Данж: алтарь Тысячелапого, auto-touch выключен (mod_dungeon_altar_1000_touch=off)")
+                    log.info("🐾 Данж: алтарь Тысячелапого не по расе/логике касания")
                 else:
-                    log.info("🐾 Данж: алтарь найден, auto-touch выключен (mod_dungeon_altar_touch=off)")
+                    log.info("🐾 Данж: алтарь найден, касание пропущено")
                 return
             d = human_delay_combat("battle")
-            log.info("🐾 Данж: у алтаря жму 'Прикоснуться' через %.2fs", d)
+            log.info("🐾 Данж: у алтаря (%s) жму 'Прикоснуться' через %.2fs", altar_race or "unknown", d)
             await asyncio.sleep(d)
             await click_button(client, msg, pos=pos_touch)
             return
