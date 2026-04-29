@@ -3217,6 +3217,20 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
         if _looks_like_loss(txt_full):
             _start_loss_cooldown_random()
             return
+        # In dungeon completion screens parser can classify the message as post_battle,
+        # but the only actionable button is "Завершить". Handle it before heal flow.
+        if can_drive_dungeon:
+            pos_finish = _find_pos_by_substring(msg, "заверш")
+            if pos_finish is not None:
+                d = human_delay_combat("battle")
+                log.info("✅ Данж: нажимаю 'Завершить' через %.2fs (post_battle)", d)
+                await asyncio.sleep(d)
+                if await click_button(client, msg, pos=pos_finish):
+                    _kv_set("dungeon_run_until_ts", "0")
+                    _kv_set("dungeon_postcheck_pending", "1")
+                    await _human_sleep(kind="mode_switch", lo=1.0, hi=2.4, note="dungeon finish -> /inventory")
+                    await client.send_message(CFG.game_chat, "/inventory")
+                return
         await _handle_post_battle_heal(client, msg)
         return
 
