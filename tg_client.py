@@ -1027,6 +1027,16 @@ def _party_extract_leader_name(text: str) -> str | None:
     return name or None
 
 
+def _normalize_party_name(name: str) -> str:
+    n = (name or "").strip()
+    # Some renders can wrap names with markdown/backticks or emojis.
+    n = n.replace("`", "").replace("*", "").replace("_", "")
+    n = re.sub(r"^[^\wа-яё]+", "", n, flags=re.I)
+    n = re.sub(r"[^\wа-яё]+$", "", n, flags=re.I)
+    n = re.sub(r"\s+", " ", n).strip()
+    return _normalize_ru(n)
+
+
 def _maybe_refresh_party_identity_from_text(text: str) -> None:
     txt = (text or "").strip()
     if not txt:
@@ -1043,7 +1053,7 @@ def _maybe_refresh_party_identity_from_text(text: str) -> None:
         _kv_set("party_leader_name", leader_name)
     self_name = (get_kv("party_self_name") or "").strip()
     if self_name and leader_name:
-        is_leader = (_normalize_ru(self_name) == _normalize_ru(leader_name))
+        is_leader = (_normalize_party_name(self_name) == _normalize_party_name(leader_name))
         _kv_set("party_is_leader", "1" if is_leader else "0")
 
 
@@ -2840,9 +2850,18 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
     # Party chat nudge: "Go" means "try to inspect/unstick and keep moving".
     # We store a short-lived flag and use it in dungeon handlers below.
     if "💬" in txt_full:
-        if re.search(r"(^|\s)go($|\s|[!.?,:;])", low_full):
+        if re.search(r"(^|\s)(go|го)($|\s|[!.?,:;])", low_full):
             _kv_set("party_go_until_ts", f"{(time.time() + 22.0):.3f}")
-            log.info("🤝🧭 PARTY: поймал chat-триггер 'Go' → временно разрешаю 'Осмотреться'")
+            # Also request fresh party screen once (helps unstick stale dungeon UI).
+            try:
+                last_party_cmd_ts = float(get_kv("party_go_last_party_cmd_ts", "0") or 0.0)
+            except Exception:
+                last_party_cmd_ts = 0.0
+            now_go = time.time()
+            if (now_go - last_party_cmd_ts) > 8.0:
+                await client.send_message(CFG.game_chat, "/party")
+                _kv_set("party_go_last_party_cmd_ts", f"{now_go:.3f}")
+            log.info("🤝🧭 PARTY: поймал chat-триггер 'Go/Го' → отправил /party и временно разрешаю 'Осмотреться'")
 
     # Anti-spam hurry message
     m = HURRY_RE.search(txt_full)
@@ -3090,7 +3109,11 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
 
     # In dungeon, prefer scouting with torch set when the room asks what to do.
     pos_inspect = _find_pos_by_substring(msg, "осмотр")
-    if dungeon_runtime and pos_inspect is not None and (("что же делать" in low_full) or ("славная побед" in low_full) or go_hint_active):
+    is_party_screen = (
+        ("лидер:" in low_full and "участники:" in low_full)
+        or ("группа (id" in low_full)
+    )
+    if dungeon_runtime and pos_inspect is not None and (("что же делать" in low_full) or ("славная побед" in low_full) or go_hint_active) and (not is_party_screen):
         try:
             await _send_set_command(client, 2)  # E2: torch/navigation set
         except Exception:
