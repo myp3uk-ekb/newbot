@@ -343,15 +343,19 @@ def _looks_like_effect_expired(text: str) -> bool:
     watched = ("карас", "форел", "лосос", "кожа", "волк", "медвед", "дракон", "титан")
     return any(w in low for w in watched)
 
-def _detect_dungeon_key_target(text: str) -> str | None:
-    """Detect next-dungeon target from key acquisition/inventory text."""
+def _detect_dungeon_key_target(text: str) -> tuple[str, str | None] | None:
+    """Detect next-dungeon target and optional tier (I..V) from key text."""
     low = _normalize_ru(text or "")
     if ("ключ" not in low) and ("ключи" not in low):
         return None
+    tier = None
+    m = re.search(r"\b(i|ii|iii|iv|v)\b", low, flags=re.IGNORECASE)
+    if m:
+        tier = m.group(1).upper()
     if ("шип" in low) or ("сток" in low):
-        return "spike"   # Катакомбы Шипов
+        return ("spike", tier)   # Катакомбы Шипов
     if "ноч" in low:
-        return "night"   # Темнейшая Ночи
+        return ("night", tier)   # Темнейшая Ночи
     return None
 
 
@@ -3067,11 +3071,13 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
 
     # Immediate key-acquire trigger (e.g. "получает 🗝Ключ шипов III ..."):
     # prepare chain without waiting for explicit post-dungeon completion branch.
-    key_target_now = _detect_dungeon_key_target(txt_full)
-    if key_target_now and (get_kv("dungeon_next_key_stage", "") or "").strip() == "":
+    key_detected = _detect_dungeon_key_target(txt_full)
+    if key_detected and (get_kv("dungeon_next_key_stage", "") or "").strip() == "":
+        key_target_now, key_tier_now = key_detected
         _kv_set("dungeon_next_key_target", key_target_now)
+        _kv_set("dungeon_next_key_tier", key_tier_now or "")
         _kv_set("dungeon_next_key_stage", "open_party")
-        log.info("🗝️ Данж-цепочка: обнаружен ключ (%s) → готовлю /party", key_target_now)
+        log.info("🗝️ Данж-цепочка: обнаружен ключ (%s/%s) → готовлю /party", key_target_now, key_tier_now or "?")
         # Ask /party once if we're not already on party screen.
         if "группа" not in low_full and "/p_" not in txt_full:
             await _human_sleep(kind="mode_switch", lo=0.7, hi=1.7, note="key acquired -> /party")
@@ -3084,12 +3090,12 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
         low_inv = _normalize_ru(txt_full or "")
         is_inventory_dump = (" /i_h " in txt_full or "/i_h " in txt_full) and ("💚" in (txt_full or ""))
         if is_inventory_dump:
-            has_night_key = ("ключ" in low_inv and "ноч" in low_inv)
-            has_spike_key = ("ключ" in low_inv and ("шип" in low_inv or "сток" in low_inv))
-            if has_night_key or has_spike_key:
-                target = "night" if has_night_key else "spike"
+            detected = _detect_dungeon_key_target(txt_full)
+            if detected:
+                target, tier = detected
                 log.info("🗝️ Данж: найден ключ (%s) → открываю /party для следующего запуска", target)
                 _kv_set("dungeon_next_key_target", target)
+                _kv_set("dungeon_next_key_tier", tier or "")
                 _kv_set("dungeon_next_key_stage", "open_party")
                 await _human_sleep(kind="mode_switch", lo=0.8, hi=1.8, note="post-dungeon key -> /party")
                 await client.send_message(CFG.game_chat, "/party")
@@ -3444,6 +3450,7 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
     # Post-dungeon key chain: /party -> Подземелья -> конкретный данж по ключу.
     nxt_stage = (get_kv("dungeon_next_key_stage", "") or "").strip()
     nxt_target = (get_kv("dungeon_next_key_target", "") or "").strip()
+    nxt_tier = (get_kv("dungeon_next_key_tier", "") or "").strip().upper()
     if nxt_stage and nxt_target and state.buttons:
         btn_labels = [((b.btn_text or b.name or "").strip()) for b in state.buttons]
         low_buttons = [_normalize_ru(t) for t in btn_labels]
@@ -3458,14 +3465,27 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
                 return
         elif nxt_stage == "choose_dungeon":
             want = "темнейш" if nxt_target == "night" else "катакомб"
-            pos = _find_pos_by_substring(msg, want)
+            pos = None
+            # Prefer exact tier match when key has known level (I..V).
+            if nxt_tier:
+                for r, row in enumerate(getattr(msg, "buttons", []) or []):
+                    for c, btn in enumerate(row):
+                        t = _normalize_ru((getattr(btn, "text", "") or ""))
+                        if want in t and nxt_tier.lower() in t:
+                            pos = (r, c)
+                            break
+                    if pos is not None:
+                        break
+            if pos is None:
+                pos = _find_pos_by_substring(msg, want)
             if pos is not None:
                 d = human_delay_combat("battle")
-                log.info("🗝️ Данж-цепочка: выбираю данж '%s' через %.2fs", want, d)
+                log.info("🗝️ Данж-цепочка: выбираю данж '%s' tier=%s через %.2fs", want, nxt_tier or "any", d)
                 await asyncio.sleep(d)
                 if await click_button(client, msg, pos=pos):
                     _kv_set("dungeon_next_key_stage", "")
                     _kv_set("dungeon_next_key_target", "")
+                    _kv_set("dungeon_next_key_tier", "")
                 return
 
     # Alchemy result follow-up:
