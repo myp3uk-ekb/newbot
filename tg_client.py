@@ -3325,6 +3325,23 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
             await click_button(client, msg, pos=pos_try)
             return
 
+    # Party helper: when party is active and only one navigation button is left ("Вперёд"),
+    # press it immediately to keep the run moving.
+    if is_party_active() and len(state.buttons) == 1:
+        only_btn = _normalize_ru((state.buttons[0].btn_text or state.buttons[0].name or ""))
+        if "впер" in only_btn:
+            try:
+                # For pure navigation in party, force E2 first.
+                await _send_set_command(client, 2)  # E2: navigation/util
+            except Exception:
+                pass
+            d = human_delay_combat("battle")
+            log.info("🤝➡️ PARTY: жму единственную кнопку '%s' через %.2fs",
+                     (state.buttons[0].btn_text or state.buttons[0].name or "<единственная>"), d)
+            await asyncio.sleep(d)
+            await click_button(client, msg, index=0)
+            return
+
     # Alchemy result follow-up:
     # after trying the table, game often leaves a single "Вперёд" button.
     if can_drive_dungeon and dungeon_runtime and len(state.buttons) == 1:
@@ -3355,7 +3372,7 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
         pos_collect = _find_pos_by_substring(msg, "собрат")
         if ("странные растения" in low_txt) and (pos_collect is not None):
             try:
-                await _send_set_command(client, 3)  # E3: utility/alchemy set
+                await _send_set_command(client, 4)  # E4: utility/alchemy set
             except Exception:
                 pass
             d = human_delay_combat("battle")
@@ -4730,6 +4747,30 @@ async def mode_manager_loop(client: TelegramClient):
                 last_kick = float(get_kv("mode_last_kick_ts") or "0")
             except Exception:
                 last_kick = 0.0
+            # If party is active and chat is silent for too long, refresh party UI
+            # and try to continue with 'Осмотреться'.
+            if is_party_active():
+                stale_party = (now - last_up) > 180.0
+                try:
+                    last_party_kick = float(get_kv("party_idle_kick_ts") or "0")
+                except Exception:
+                    last_party_kick = 0.0
+                if stale_party and (now - last_party_kick) > 180.0:
+                    log.info("🤝⏱️ PARTY: тишина >3м → отправляю /party и 'Осмотреться'")
+                    try:
+                        await asyncio.sleep(human_delay_cmd("mode_switch"))
+                        await client.send_message(CFG.game_chat, "/party")
+                        await asyncio.sleep(human_delay_cmd("battle"))
+                        await client.send_message(CFG.game_chat, "👀Осмотреться")
+                    except Exception:
+                        try:
+                            await client.send_message(CFG.game_chat, "Осмотреться")
+                        except Exception:
+                            pass
+                    _kv_set("party_idle_kick_ts", str(now))
+                    await asyncio.sleep(5.0)
+                    continue
+
             if desired == current and desired in ("forest", "fishing"):
                 stale = (now - last_up) > 20.0
                 if stale and (now - last_kick) > 30.0:
