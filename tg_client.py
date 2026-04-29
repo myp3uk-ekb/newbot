@@ -343,6 +343,17 @@ def _looks_like_effect_expired(text: str) -> bool:
     watched = ("карас", "форел", "лосос", "кожа", "волк", "медвед", "дракон", "титан")
     return any(w in low for w in watched)
 
+def _detect_dungeon_key_target(text: str) -> str | None:
+    """Detect next-dungeon target from key acquisition/inventory text."""
+    low = _normalize_ru(text or "")
+    if ("ключ" not in low) and ("ключи" not in low):
+        return None
+    if ("шип" in low) or ("сток" in low):
+        return "spike"   # Катакомбы Шипов
+    if "ноч" in low:
+        return "night"   # Темнейшая Ночи
+    return None
+
 
 async def _use_preferred_dungeon_buffs(client: TelegramClient, *, reason: str, force: bool = False) -> bool:
     """Use preferred dungeon/party consumables from inventory.
@@ -423,6 +434,21 @@ async def _use_preferred_dungeon_buffs(client: TelegramClient, *, reason: str, f
     _kv_set("dungeon_buffs_last_ts", f"{now:.3f}")
     log.info("🧪 DUNGEON/PARTY buffs applied (%s): %s item(s)", reason, used)
     return used > 0
+
+
+def _can_apply_dungeon_buffs_now() -> bool:
+    """Gate dungeon/party buff usage to active combat contexts only.
+
+    Prevents wasting fish/consumables in hub/mail/inventory screens when effects
+    expire outside a dungeon run.
+    """
+    now = time.time()
+    run_until = float(get_kv("dungeon_run_until_ts", "0") or 0.0)
+    if now < run_until:
+        return True
+    # IMPORTANT: party presence alone is not enough (can be idle in town).
+    # For auto-reapply on "effect expired" we should be in dungeon runtime.
+    return False
 
 
 _FETCH_EFFECTS_LOCK = asyncio.Lock()
@@ -2993,14 +3019,6 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
     except Exception as e:
         log.error(f"PARTY handler error: {e}")
 
-    # Re-apply key dungeon/party buffs when game reports effect expiration.
-    try:
-        if _looks_like_effect_expired(txt_full):
-            await _use_preferred_dungeon_buffs(client, reason="effect_expired", force=False)
-    except Exception as e:
-        log.warning("🧪 buff-reapply error: %s", e)
-
-
     # Module toggles: fishing can work even when /pause is on, but can be disabled explicitly.
     # Exception: while mode-manager is switching fishing -> pet/forest, we still need to
     # process the current fishing screen (hook/cast/cancel) to finish the active catch.
@@ -3046,6 +3064,38 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
     go_hint_active = (now_ts < go_until_ts)
     party_passive_in_dungeon = is_party_active() and dungeon_runtime and (not is_party_driver())
     can_drive_dungeon = (not party_passive_in_dungeon)
+
+    # Immediate key-acquire trigger (e.g. "получает 🗝Ключ шипов III ..."):
+    # prepare chain without waiting for explicit post-dungeon completion branch.
+    key_target_now = _detect_dungeon_key_target(txt_full)
+    if key_target_now and (get_kv("dungeon_next_key_stage", "") or "").strip() == "":
+        _kv_set("dungeon_next_key_target", key_target_now)
+        _kv_set("dungeon_next_key_stage", "open_party")
+        log.info("🗝️ Данж-цепочка: обнаружен ключ (%s) → готовлю /party", key_target_now)
+        # Ask /party once if we're not already on party screen.
+        if "группа" not in low_full and "/p_" not in txt_full:
+            await _human_sleep(kind="mode_switch", lo=0.7, hi=1.7, note="key acquired -> /party")
+            await client.send_message(CFG.game_chat, "/party")
+
+    # Post-dungeon key check flow:
+    # 1) after pressing "Завершить", request /inventory
+    # 2) if inventory dump shows known dungeon keys -> open /party
+    if (get_kv("dungeon_postcheck_pending", "0") == "1"):
+        low_inv = _normalize_ru(txt_full or "")
+        is_inventory_dump = (" /i_h " in txt_full or "/i_h " in txt_full) and ("💚" in (txt_full or ""))
+        if is_inventory_dump:
+            has_night_key = ("ключ" in low_inv and "ноч" in low_inv)
+            has_spike_key = ("ключ" in low_inv and ("шип" in low_inv or "сток" in low_inv))
+            if has_night_key or has_spike_key:
+                target = "night" if has_night_key else "spike"
+                log.info("🗝️ Данж: найден ключ (%s) → открываю /party для следующего запуска", target)
+                _kv_set("dungeon_next_key_target", target)
+                _kv_set("dungeon_next_key_stage", "open_party")
+                await _human_sleep(kind="mode_switch", lo=0.8, hi=1.8, note="post-dungeon key -> /party")
+                await client.send_message(CFG.game_chat, "/party")
+            else:
+                log.info("🗝️ Данж: ключей после завершения не найдено.")
+            _kv_set("dungeon_postcheck_pending", "0")
 
     # allow_noncombat: разрешаем некоторые "служебные" флоу даже во время пауз
     # (поймать воришку, пет-флоу, хил после боя, ответ на запрос ХП и т.п.)
@@ -3391,6 +3441,33 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
             await click_button(client, msg, index=0)
             return
 
+    # Post-dungeon key chain: /party -> Подземелья -> конкретный данж по ключу.
+    nxt_stage = (get_kv("dungeon_next_key_stage", "") or "").strip()
+    nxt_target = (get_kv("dungeon_next_key_target", "") or "").strip()
+    if nxt_stage and nxt_target and state.buttons:
+        btn_labels = [((b.btn_text or b.name or "").strip()) for b in state.buttons]
+        low_buttons = [_normalize_ru(t) for t in btn_labels]
+        if nxt_stage == "open_party":
+            pos = _find_pos_by_substring(msg, "подзем")
+            if pos is not None:
+                d = human_delay_combat("battle")
+                log.info("🗝️ Данж-цепочка: в /party жму 'Подземелья' через %.2fs", d)
+                await asyncio.sleep(d)
+                if await click_button(client, msg, pos=pos):
+                    _kv_set("dungeon_next_key_stage", "choose_dungeon")
+                return
+        elif nxt_stage == "choose_dungeon":
+            want = "темнейш" if nxt_target == "night" else "катакомб"
+            pos = _find_pos_by_substring(msg, want)
+            if pos is not None:
+                d = human_delay_combat("battle")
+                log.info("🗝️ Данж-цепочка: выбираю данж '%s' через %.2fs", want, d)
+                await asyncio.sleep(d)
+                if await click_button(client, msg, pos=pos):
+                    _kv_set("dungeon_next_key_stage", "")
+                    _kv_set("dungeon_next_key_target", "")
+                return
+
     # Alchemy result follow-up:
     # after trying the table, game often leaves a single "Вперёд" button.
     if can_drive_dungeon and dungeon_runtime and len(state.buttons) == 1:
@@ -3530,6 +3607,20 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
             await asyncio.sleep(d)
             if not await _click_action_button_resilient(client, msg, labels=["Вперёд!", "Вперед!"], timeout_sec=4.0):
                 log.warning("➡️ Не удалось нажать 'Вперёд' после переключения E2")
+            return
+
+    # Dungeon completion: press green "Завершить", then run a key check flow.
+    if can_drive_dungeon:
+        pos_finish = _find_pos_by_substring(msg, "заверш")
+        if pos_finish is not None:
+            d = human_delay_combat("battle")
+            log.info("✅ Данж: нажимаю 'Завершить' через %.2fs", d)
+            await asyncio.sleep(d)
+            if await click_button(client, msg, pos=pos_finish):
+                _kv_set("dungeon_run_until_ts", "0")
+                _kv_set("dungeon_postcheck_pending", "1")
+                await _human_sleep(kind="mode_switch", lo=1.0, hi=2.4, note="dungeon finish -> /inventory")
+                await client.send_message(CFG.game_chat, "/inventory")
             return
 
     if not state.can_act or not state.buttons:
@@ -5475,3 +5566,13 @@ async def run():
 
     log.info("✅ Хендлеры установлены (game + control).")
     await client.run_until_disconnected()
+    # Re-apply key dungeon/party buffs when game reports effect expiration,
+    # but only in active dungeon/party context.
+    try:
+        if _looks_like_effect_expired(txt_full):
+            if dungeon_context_now and _can_apply_dungeon_buffs_now():
+                await _use_preferred_dungeon_buffs(client, reason="effect_expired", force=False)
+            else:
+                log.info("🧪 buff-reapply skipped (inactive context): %s", "effect_expired")
+    except Exception as e:
+        log.warning("🧪 buff-reapply error: %s", e)
