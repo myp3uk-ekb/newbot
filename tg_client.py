@@ -888,6 +888,11 @@ def mod_dungeon_altar_touch_enabled() -> bool:
     return _kv_bool("mod_dungeon_altar_touch", False)
 
 
+def mod_dungeon_grave_enabled() -> bool:
+    # Default OFF: graves can trigger extra fights.
+    return _kv_bool("mod_dungeon_grave", False)
+
+
 def _lmstudio_enabled() -> bool:
     return bool(getattr(CFG, "lmstudio_base_url", "").strip()) and bool(getattr(CFG, "lmstudio_model", "").strip())
 
@@ -3637,6 +3642,27 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
                 log.warning("➡️ Не удалось нажать 'Вперёд' после переключения E2")
             return
 
+    # Grave room: optionally keep opening graves, or skip forward.
+    if can_drive_dungeon and dungeon_runtime:
+        grave_room = ("могил" in low_full) and ((_find_pos_by_substring(msg, "вскры") is not None) or (_find_pos_by_substring(msg, "впер") is not None))
+        if grave_room:
+            if mod_dungeon_grave_enabled():
+                pos_open = _find_pos_by_substring(msg, "вскры")
+                if pos_open is not None:
+                    d = human_delay_combat("battle")
+                    log.info("⚰️ Данж: могила-mode=on, жму 'Вскрыть' через %.2fs", d)
+                    await asyncio.sleep(d)
+                    await click_button(client, msg, pos=pos_open)
+                    return
+            else:
+                pos_fwd_grave = _find_pos_by_substring(msg, "впер")
+                if pos_fwd_grave is not None:
+                    d = human_delay_combat("battle")
+                    log.info("⚰️ Данж: могила-mode=off, пропускаю могилу и жму 'Вперёд' через %.2fs", d)
+                    await asyncio.sleep(d)
+                    await click_button(client, msg, pos=pos_fwd_grave)
+                    return
+
     # Dungeon completion: press green "Завершить", then run a key check flow.
     if can_drive_dungeon:
         pos_finish = _find_pos_by_substring(msg, "заверш")
@@ -5574,6 +5600,7 @@ async def run():
             ("work","mod_work","⛏️ work"),
             ("dungeon","mod_dungeon","🕸 dungeon"),
             ("altar","mod_dungeon_altar_touch","🐾 altar_touch"),
+            ("grave","mod_dungeon_grave","⚰️ grave"),
             ("pet","mod_pet","🐾 pet"),
             ("thief","mod_thief","🦝 thief"),
         ]:
@@ -5595,6 +5622,7 @@ async def run():
                     f"/work on|off     (сейчас: {'on' if mod_work_enabled() else 'off'})",
                     f"/dungeon on|off  (сейчас: {'on' if mod_dungeon_enabled() else 'off'})",
                     f"/altar on|off    (сейчас: {'on' if mod_dungeon_altar_touch_enabled() else 'off'})",
+                    f"/grave on|off    (сейчас: {'on' if mod_dungeon_grave_enabled() else 'off'})",
                     f"/driver on|off|auto (сейчас: {party_driver_mode()}, effective={'driver' if is_party_driver() else 'passive'})",
                     f"/pet on|off      (сейчас: {'on' if mod_pet_enabled() else 'off'})  interval={getattr(CFG,'pet_interval_min_hours',1)}-{getattr(CFG,'pet_interval_max_hours',2)}h",
                     f"/thief on|off    (сейчас: {'on' if mod_thief_enabled() else 'off'})",
