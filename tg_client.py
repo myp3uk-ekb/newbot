@@ -888,6 +888,11 @@ def mod_dungeon_altar_touch_enabled() -> bool:
     return _kv_bool("mod_dungeon_altar_touch", False)
 
 
+def mod_dungeon_grave_enabled() -> bool:
+    # Default OFF: graves can trigger extra fights.
+    return _kv_bool("mod_dungeon_grave", False)
+
+
 def _lmstudio_enabled() -> bool:
     return bool(getattr(CFG, "lmstudio_base_url", "").strip()) and bool(getattr(CFG, "lmstudio_model", "").strip())
 
@@ -3569,10 +3574,11 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
             return
 
     # Blocked/boarded passage event:
-    # wait up to 60s in "boarded passage" rooms, then continue forward (E2 + forward).
+    # wait up to 15s in "boarded passage" rooms, then continue forward (E2 + forward).
     if can_drive_dungeon and dungeon_runtime:
         low_txt = _normalize_ru(txt_full)
         pos_forward_local = _find_pos_by_substring(msg, "впер")
+        pos_chop_local = _find_pos_by_substring(msg, "проруб")
         boarded_room = ("заколочен" in low_txt) or ("заколоченный проход" in low_txt)
         wait_key = "dungeon_boarded_wait_until_ts"
         now_ts = _now_ts()
@@ -3580,14 +3586,21 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
         if boarded_room:
             wait_until = float(get_kv(wait_key, "0") or 0.0)
             if wait_until <= now_ts:
-                wait_until = now_ts + 60.0
+                wait_until = now_ts + 15.0
                 _kv_set(wait_key, f"{wait_until:.3f}")
-                log.info("🪓 Данж: заколоченный проход, старт паузы 60s")
+                log.info("🪓 Данж: заколоченный проход, старт паузы 15s")
 
             left = max(0.0, wait_until - now_ts)
-            if left > 0 and pos_forward_local is not None:
-                log.info("🪓 Данж: жду разбор прохода, осталось %.1fs", left)
-                return
+            if left > 0:
+                if pos_chop_local is not None:
+                    d = human_delay_combat("battle")
+                    log.info("🪓 Данж: жму 'Прорубить' через %.2fs (до авто-движения %.1fs)", d, left)
+                    await asyncio.sleep(d)
+                    await click_button(client, msg, pos=pos_chop_local)
+                    return
+                if pos_forward_local is not None:
+                    log.info("🪓 Данж: жду разбор прохода, осталось %.1fs", left)
+                    return
 
             if pos_forward_local is not None:
                 try:
@@ -3629,6 +3642,27 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
                 log.warning("➡️ Не удалось нажать 'Вперёд' после переключения E2")
             return
 
+    # Grave room: optionally keep opening graves, or skip forward.
+    if can_drive_dungeon and dungeon_runtime:
+        grave_room = ("могил" in low_full) and ((_find_pos_by_substring(msg, "вскры") is not None) or (_find_pos_by_substring(msg, "впер") is not None))
+        if grave_room:
+            if mod_dungeon_grave_enabled():
+                pos_open = _find_pos_by_substring(msg, "вскры")
+                if pos_open is not None:
+                    d = human_delay_combat("battle")
+                    log.info("⚰️ Данж: могила-mode=on, жму 'Вскрыть' через %.2fs", d)
+                    await asyncio.sleep(d)
+                    await click_button(client, msg, pos=pos_open)
+                    return
+            else:
+                pos_fwd_grave = _find_pos_by_substring(msg, "впер")
+                if pos_fwd_grave is not None:
+                    d = human_delay_combat("battle")
+                    log.info("⚰️ Данж: могила-mode=off, пропускаю могилу и жму 'Вперёд' через %.2fs", d)
+                    await asyncio.sleep(d)
+                    await click_button(client, msg, pos=pos_fwd_grave)
+                    return
+
     # Dungeon completion: press green "Завершить", then run a key check flow.
     if can_drive_dungeon:
         pos_finish = _find_pos_by_substring(msg, "заверш")
@@ -3636,11 +3670,16 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
             d = human_delay_combat("battle")
             log.info("✅ Данж: нажимаю 'Завершить' через %.2fs", d)
             await asyncio.sleep(d)
-            if await click_button(client, msg, pos=pos_finish):
+            pressed = await click_button(client, msg, pos=pos_finish)
+            if not pressed:
+                pressed = await _click_action_button_resilient(client, msg, labels=["✅Завершить", "Завершить"], timeout_sec=4.0)
+            if pressed:
                 _kv_set("dungeon_run_until_ts", "0")
                 _kv_set("dungeon_postcheck_pending", "1")
                 await _human_sleep(kind="mode_switch", lo=1.0, hi=2.4, note="dungeon finish -> /inventory")
                 await client.send_message(CFG.game_chat, "/inventory")
+            else:
+                log.warning("✅ Данж: не удалось нажать 'Завершить' (inline/reply)")
             return
 
     if not state.can_act or not state.buttons:
@@ -4916,17 +4955,25 @@ async def mode_manager_loop(client: TelegramClient):
                 except Exception:
                     last_party_kick = 0.0
                 if stale_party and (now - last_party_kick) > 180.0:
-                    log.info("🤝⏱️ PARTY: тишина >3м → отправляю /party и 'Осмотреться'")
+                    log.info("🤝⏱️ PARTY: тишина >3м → отправляю /party и жму кнопку 'Осмотреться' (без текста)")
                     try:
                         await asyncio.sleep(human_delay_cmd("mode_switch"))
                         await client.send_message(CFG.game_chat, "/party")
                         await asyncio.sleep(human_delay_cmd("battle"))
-                        await client.send_message(CFG.game_chat, "👀Осмотреться")
+
+                        recent = await _await_recent_message(
+                            client,
+                            CFG.game_chat,
+                            predicate=lambda m: _find_pos_by_substring(m, "осмотреться") is not None,
+                            timeout=4.0,
+                            poll=0.7,
+                        )
+                        if recent is not None:
+                            pos_look = _find_pos_by_substring(recent, "осмотреться")
+                            if pos_look is not None:
+                                await click_button(client, recent, pos=pos_look)
                     except Exception:
-                        try:
-                            await client.send_message(CFG.game_chat, "Осмотреться")
-                        except Exception:
-                            pass
+                        pass
                     _kv_set("party_idle_kick_ts", str(now))
                     await asyncio.sleep(5.0)
                     continue
@@ -5553,6 +5600,7 @@ async def run():
             ("work","mod_work","⛏️ work"),
             ("dungeon","mod_dungeon","🕸 dungeon"),
             ("altar","mod_dungeon_altar_touch","🐾 altar_touch"),
+            ("grave","mod_dungeon_grave","⚰️ grave"),
             ("pet","mod_pet","🐾 pet"),
             ("thief","mod_thief","🦝 thief"),
         ]:
@@ -5574,6 +5622,7 @@ async def run():
                     f"/work on|off     (сейчас: {'on' if mod_work_enabled() else 'off'})",
                     f"/dungeon on|off  (сейчас: {'on' if mod_dungeon_enabled() else 'off'})",
                     f"/altar on|off    (сейчас: {'on' if mod_dungeon_altar_touch_enabled() else 'off'})",
+                    f"/grave on|off    (сейчас: {'on' if mod_dungeon_grave_enabled() else 'off'})",
                     f"/driver on|off|auto (сейчас: {party_driver_mode()}, effective={'driver' if is_party_driver() else 'passive'})",
                     f"/pet on|off      (сейчас: {'on' if mod_pet_enabled() else 'off'})  interval={getattr(CFG,'pet_interval_min_hours',1)}-{getattr(CFG,'pet_interval_max_hours',2)}h",
                     f"/thief on|off    (сейчас: {'on' if mod_thief_enabled() else 'off'})",
