@@ -2677,7 +2677,56 @@ async def _handle_post_battle_heal(client: TelegramClient, msg):
         except Exception:
             pass
 
+    async def _party_revive_and_check() -> bool:
+        """Post-battle party flow:
+        1) Full heal self.
+        2) Wait 15s, revive unconscious allies (green-heart buttons).
+        3) Wait 15s, press/look around and send /party to verify statuses.
+        Returns True when flow was executed.
+        """
+        low_text = _normalize_ru(text)
+        if ("бой затих" not in low_text) or ("без сознания" not in low_text):
+            return False
+
+        full_pos = _find_pos_by_substring(msg, "полное лечение")
+        if full_pos is not None:
+            log.info("🩹 PARTY post_battle: жму 'Полное лечение'")
+            await click_button(client, msg, pos=full_pos)
+        else:
+            try:
+                await client.send_message(chat, "🧪Полное лечение")
+            except Exception:
+                await client.send_message(chat, "Полное лечение")
+
+        await asyncio.sleep(15.0)
+
+        # Refresh message and press all visible revive buttons (💚...).
+        try:
+            cur_msg = await client.get_messages(chat, ids=getattr(msg, "id", None))
+        except Exception:
+            cur_msg = msg
+        btns = list(_iter_buttons(cur_msg))
+        for i, b in enumerate(btns):
+            label = _normalize_ru((b.btn_text or b.name or ""))
+            if label.startswith("💚") or ("💚" in (b.btn_text or "")):
+                try:
+                    log.info("💚 PARTY post_battle: поднимаю союзника '%s'", (b.btn_text or b.name or "<ally>"))
+                    await click_button(client, cur_msg, index=i)
+                    await asyncio.sleep(0.8)
+                except Exception:
+                    pass
+
+        await asyncio.sleep(15.0)
+        await _continue_after_battle()
+        try:
+            await client.send_message(chat, "/party")
+        except Exception:
+            pass
+        return True
+
     cur, mx = await _read_hp_from_text(text)
+    if await _party_revive_and_check():
+        return
     if cur is None or mx is None:
         await _continue_after_battle()
         return
@@ -3393,9 +3442,9 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
                 now_ts = _now_ts()
                 wait_until = float(get_kv(wait_key, "0") or 0.0)
                 if wait_until <= now_ts:
-                    wait_until = now_ts + 60.0
+                    wait_until = now_ts + 15.0
                     _kv_set(wait_key, f"{wait_until:.3f}")
-                    log.info("🐾 Данж: алтарь найден, auto-touch=off → жду 60s перед 'Вперёд'")
+                    log.info("🐾 Данж: алтарь найден, auto-touch=off → жду 15s перед 'Вперёд'")
 
                 left = max(0.0, wait_until - now_ts)
                 if left > 0 and pos_forward_local is not None:
