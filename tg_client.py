@@ -984,6 +984,79 @@ def mod_party_enabled() -> bool:
     return _kv_bool("mod_party", getattr(CFG, "mod_party_enabled", False))
 
 
+def party_driver_mode() -> str:
+    """Party role mode: on(driver) / off(passive) / auto."""
+    raw = (get_kv("party_driver_mode") or "").strip().lower()
+    if raw in ("on", "off", "auto"):
+        return raw
+    return "auto"
+
+
+def _set_party_driver_mode(mode: str) -> None:
+    m = (mode or "").strip().lower()
+    if m not in ("on", "off", "auto"):
+        return
+    _kv_set("party_driver_mode", m)
+
+
+def is_party_driver() -> bool:
+    """Whether this account should actively drive party dungeon navigation."""
+    mode = party_driver_mode()
+    if mode == "on":
+        return True
+    if mode == "off":
+        return False
+    # auto mode
+    return _kv_bool("party_is_leader", False)
+
+
+def _extract_game_name_from_profileish_text(text: str) -> str | None:
+    # Example: "ТриТопора [69] 💚: 2540/2540 ..."
+    m = re.search(r"^\s*([^\n\[]+?)\s*\[\d+\]\s*💚\s*:", (text or ""), re.S)
+    if not m:
+        return None
+    name = (m.group(1) or "").strip()
+    return name or None
+
+
+def _party_extract_leader_name(text: str) -> str | None:
+    m = re.search(r"лидер:\s*([^\[\n]+?)\s*\[\d+\]", (text or ""), re.I)
+    if not m:
+        return None
+    name = (m.group(1) or "").strip()
+    return name or None
+
+
+def _normalize_party_name(name: str) -> str:
+    n = (name or "").strip()
+    # Some renders can wrap names with markdown/backticks or emojis.
+    n = n.replace("`", "").replace("*", "").replace("_", "")
+    n = re.sub(r"^[^\wа-яё]+", "", n, flags=re.I)
+    n = re.sub(r"[^\wа-яё]+$", "", n, flags=re.I)
+    n = re.sub(r"\s+", " ", n).strip()
+    return _normalize_ru(n)
+
+
+def _maybe_refresh_party_identity_from_text(text: str) -> None:
+    txt = (text or "").strip()
+    if not txt:
+        return
+    game_name = _extract_game_name_from_profileish_text(txt)
+    if game_name:
+        _kv_set("party_self_name", game_name)
+
+    low = txt.lower()
+    if not (low.startswith("группа (id") or ("лидер:" in low and "участники:" in low)):
+        return
+    leader_name = _party_extract_leader_name(txt)
+    if leader_name:
+        _kv_set("party_leader_name", leader_name)
+    self_name = (get_kv("party_self_name") or "").strip()
+    if self_name and leader_name:
+        is_leader = (_normalize_party_name(self_name) == _normalize_party_name(leader_name))
+        _kv_set("party_is_leader", "1" if is_leader else "0")
+
+
 def is_party_active() -> bool:
     # Guard against stale sticky party state: if we haven't seen any party
     # lifecycle/screen signal for a long time, auto-clear the flag.
@@ -2450,6 +2523,7 @@ async def _handle_party_event(client: TelegramClient, msg: Message, state) -> bo
 
     # Party screen (/party): we can use it as a weak signal we are in a party.
     if text.lower().startswith("группа (id") or ("лидер:" in text.lower() and "участники:" in text.lower()):
+        _maybe_refresh_party_identity_from_text(text)
         _party_enter_modes("party_screen")
         set_party_active(True)
         set_kv("party_last_event", "party_screen")
@@ -2771,6 +2845,23 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
     txt = txt_full.replace("\n", " ")
     log.info(f"🧩 {kind} msg {msg.id}: {txt[:180]!r}")
     low_full = _normalize_ru(txt_full)
+    _maybe_refresh_party_identity_from_text(txt_full)
+
+    # Party chat nudge: "Go" means "try to inspect/unstick and keep moving".
+    # We store a short-lived flag and use it in dungeon handlers below.
+    if "💬" in txt_full:
+        if re.search(r"(^|\s)(go|го)($|\s|[!.?,:;])", low_full):
+            _kv_set("party_go_until_ts", f"{(time.time() + 22.0):.3f}")
+            # Also request fresh party screen once (helps unstick stale dungeon UI).
+            try:
+                last_party_cmd_ts = float(get_kv("party_go_last_party_cmd_ts", "0") or 0.0)
+            except Exception:
+                last_party_cmd_ts = 0.0
+            now_go = time.time()
+            if (now_go - last_party_cmd_ts) > 8.0:
+                await client.send_message(CFG.game_chat, "/party")
+                _kv_set("party_go_last_party_cmd_ts", f"{now_go:.3f}")
+            log.info("🤝🧭 PARTY: поймал chat-триггер 'Go/Го' → отправил /party и временно разрешаю 'Осмотреться'")
 
     # Anti-spam hurry message
     m = HURRY_RE.search(txt_full)
@@ -2894,6 +2985,10 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
         _kv_set("dungeon_run_until_ts", f"{run_until:.3f}")
 
     dungeon_runtime = mod_dungeon_enabled() and (dungeon_context_now or now_ts < run_until)
+    go_until_ts = float(get_kv("party_go_until_ts", "0") or 0.0)
+    go_hint_active = (now_ts < go_until_ts)
+    party_passive_in_dungeon = is_party_active() and dungeon_runtime and (not is_party_driver())
+    can_drive_dungeon = (not party_passive_in_dungeon)
 
     # allow_noncombat: разрешаем некоторые "служебные" флоу даже во время пауз
     # (поймать воришку, пет-флоу, хил после боя, ответ на запрос ХП и т.п.)
@@ -3014,7 +3109,11 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
 
     # In dungeon, prefer scouting with torch set when the room asks what to do.
     pos_inspect = _find_pos_by_substring(msg, "осмотр")
-    if dungeon_runtime and pos_inspect is not None and (("что же делать" in low_full) or ("славная побед" in low_full)):
+    is_party_screen = (
+        ("лидер:" in low_full and "участники:" in low_full)
+        or ("группа (id" in low_full)
+    )
+    if dungeon_runtime and pos_inspect is not None and (("что же делать" in low_full) or ("славная побед" in low_full) or go_hint_active) and (not is_party_screen):
         try:
             await _send_set_command(client, 2)  # E2: torch/navigation set
         except Exception:
@@ -3029,7 +3128,7 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
     pos_attack = _find_pos_by_substring(msg, "напасть")
     if pos_attack is None:
         pos_attack = _find_pos_by_substring(msg, "в бой")
-    if pos_attack is not None:
+    if pos_attack is not None and can_drive_dungeon:
         try:
             await _send_set_command(client, 1)  # E1: combat set
         except Exception:
@@ -3046,7 +3145,7 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
     # while set-switch animation is still in progress, and the `/e_2` response
     # may hide the actionable "Вперёд!" button message. We switch back in
     # follow-up handlers right before navigation clicks.
-    if ("взломать замок" in low_full) or (_find_pos_by_substring(msg, "взлом") is not None):
+    if can_drive_dungeon and (("взломать замок" in low_full) or (_find_pos_by_substring(msg, "взлом") is not None)):
         pos_lock = _find_pos_by_substring(msg, "взлом")
         if pos_lock is not None:
             try:
@@ -3066,7 +3165,7 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
     # 4) campfire,
     # 5) chest,
     # 6) fallback to first room.
-    if looks_like_dungeon_prompt(txt_full, labels):
+    if can_drive_dungeon and looks_like_dungeon_prompt(txt_full, labels):
         best_room = choose_dungeon_room_by_priority(txt_full)
         if best_room is not None:
             pos_room = _find_pos_by_substring(msg, str(best_room))
@@ -3096,7 +3195,7 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
     # - first click "drink" when available;
     # - then, on the follow-up message ("health restored"), there is often only one
     #   navigation button left, and we should press it even if it's not literally "вперёд".
-    if dungeon_runtime and ("колодец" in low_full):
+    if can_drive_dungeon and dungeon_runtime and ("колодец" in low_full):
         pos_drink = _find_pos_by_substring(msg, "вып")
         if pos_drink is None:
             pos_drink = _find_pos_by_substring(msg, "пить")
@@ -3111,7 +3210,7 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
             await click_button(client, msg, pos=pos_drink)
             return
 
-    if dungeon_runtime and len(state.buttons) == 1:
+    if can_drive_dungeon and dungeon_runtime and len(state.buttons) == 1:
         low_txt = _normalize_ru(txt_full)
         if ("здоровье восполнено" in low_txt) or ("пьет из колодца" in low_txt):
             try:
@@ -3127,7 +3226,7 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
 
     # Chest follow-up often leaves a single navigation button ("Вперёд").
     # Keep moving automatically with E2 to avoid getting stuck in utility set.
-    if dungeon_runtime and len(state.buttons) == 1:
+    if can_drive_dungeon and dungeon_runtime and len(state.buttons) == 1:
         low_txt = _normalize_ru(txt_full)
         only_btn = _normalize_ru((state.buttons[0].btn_text or state.buttons[0].name or ""))
         chest_done = (
@@ -3152,7 +3251,7 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
 
     # Campfire follow-up after "Осмотреться":
     # if "Разжечь" is available, press it first.
-    if dungeon_runtime:
+    if can_drive_dungeon and dungeon_runtime:
         low_txt = _normalize_ru(txt_full)
         pos_fire = _find_pos_by_substring(msg, "разж")
         if ("это костер" in low_txt or "это костёр" in low_txt) and (pos_fire is not None):
@@ -3169,7 +3268,7 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
     # Campfire follow-up after "Разжечь":
     # once the fire is lit, the game usually leaves a single "Вперёд" button.
     # Continue automatically and make sure E2 is active for navigation.
-    if dungeon_runtime and len(state.buttons) == 1:
+    if can_drive_dungeon and dungeon_runtime and len(state.buttons) == 1:
         low_txt = _normalize_ru(txt_full)
         only_btn = _normalize_ru((state.buttons[0].btn_text or state.buttons[0].name or ""))
         campfire_done = (
@@ -3191,7 +3290,7 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
 
     # Alchemy table follow-up:
     # equip utility set (E3) and press "Попробовать".
-    if dungeon_runtime:
+    if can_drive_dungeon and dungeon_runtime:
         low_txt = _normalize_ru(txt_full)
         pos_try = _find_pos_by_substring(msg, "попроб")
         if (
@@ -3211,7 +3310,7 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
 
     # Strange plants event:
     # equip utility set (E3) and press "Собрать".
-    if dungeon_runtime:
+    if can_drive_dungeon and dungeon_runtime:
         low_txt = _normalize_ru(txt_full)
         pos_collect = _find_pos_by_substring(msg, "собрат")
         if ("странные растения" in low_txt) and (pos_collect is not None):
@@ -3225,10 +3324,34 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
             await click_button(client, msg, pos=pos_collect)
             return
 
+    # Bastet altar event:
+    # press "Прикоснуться" when available.
+    if can_drive_dungeon and dungeon_runtime:
+        low_txt = _normalize_ru(txt_full)
+        pos_touch = _find_pos_by_substring(msg, "прикосн")
+        if (("алтар" in low_txt) or ("бастет" in low_txt)) and (pos_touch is not None):
+            d = human_delay_combat("battle")
+            log.info("🐾 Данж: у алтаря жму 'Прикоснуться' через %.2fs", d)
+            await asyncio.sleep(d)
+            await click_button(client, msg, pos=pos_touch)
+            return
+
+    # Blocked passage / rubble event:
+    # press "Разобрать" when available.
+    if can_drive_dungeon and dungeon_runtime:
+        low_txt = _normalize_ru(txt_full)
+        pos_mine = _find_pos_by_substring(msg, "разобрат")
+        if (("каменный завал" in low_txt) or ("завал" in low_txt)) and (pos_mine is not None):
+            d = human_delay_combat("battle")
+            log.info("⛏️ Данж: у завала жму 'Разобрать' через %.2fs", d)
+            await asyncio.sleep(d)
+            await click_button(client, msg, pos=pos_mine)
+            return
+
     # After "Осмотреться" the game can say "ничего интересного" and offer "Вперёд!".
     # Continue automatically to the next fork.
     pos_forward = _find_pos_by_substring(msg, "впер")
-    if pos_forward is not None:
+    if can_drive_dungeon and pos_forward is not None:
         low_txt = _normalize_ru(txt_full)
         if ("ничего интересного" in low_txt) or ("следующей развилке" in low_txt) or ("куда пойдем" in low_txt):
             try:
@@ -4624,6 +4747,28 @@ async def run():
         # Party control (только в «Избранном»)
         #   /party on|off|status
         #   /partyhp <percent>|status
+        #   /driver on|off|auto|status
+        if text.startswith("/driver"):
+            parts = text.split()
+            if len(parts) == 1 or (len(parts) == 2 and parts[1] in ("status", "s")):
+                mode = party_driver_mode()
+                is_lead = "yes" if _kv_bool("party_is_leader", False) else "no"
+                self_name = (get_kv("party_self_name") or "-").strip()
+                leader_name = (get_kv("party_leader_name") or "-").strip()
+                effective = "driver" if is_party_driver() else "passive"
+                await evt.reply(
+                    f"🚗 driver_mode={mode}, effective={effective}, is_leader={is_lead}\n"
+                    f"self={self_name}, leader={leader_name}\n"
+                    "Команды: /driver on|off|auto | /driver status"
+                )
+                return
+            if len(parts) == 2 and parts[1] in ("on", "off", "auto"):
+                _set_party_driver_mode(parts[1])
+                await evt.reply(f"🚗 driver_mode={party_driver_mode()} (effective={'driver' if is_party_driver() else 'passive'})")
+                return
+            await evt.reply("Формат: /driver on|off|auto | /driver status")
+            return
+
         if text.startswith("/partyhp"):
             parts = text.split()
             if len(parts) == 1 or (len(parts) == 2 and parts[1] in ("status","s")):
@@ -4797,6 +4942,7 @@ async def run():
                 f"work={'on' if mod_work_enabled() else 'off'}",
                 f"dungeon={'on' if mod_dungeon_enabled() else 'off'}",
                 f"party={'on' if mod_party_enabled() else 'off'} active={'yes' if is_party_active() else 'no'} hp_threshold={int(round(float(get_kv('party_heal_threshold_pct') or getattr(CFG, 'party_heal_threshold_pct', 0.6))*100))}%",
+                f"driver_mode={party_driver_mode()} effective={'driver' if is_party_driver() else 'passive'}",
                 f"pet={'on' if mod_pet_enabled() else 'off'} last={pet_last} next_in={pet_left_str} interval={interval} due={'yes' if _pet_due_now() else 'no'}",
             ]
 
@@ -5091,6 +5237,12 @@ async def run():
             await evt.reply("🎣 fishing=off")
             return
 
+        # Common typo alias
+        if text in ("/dangeon on", "/dangeon off"):
+            _set_kv_bool("mod_dungeon", text.endswith("on"))
+            await evt.reply("🕸 dungeon=" + ("on" if mod_dungeon_enabled() else "off"))
+            return
+
         for cmd, key, label in [
             ("forest","mod_forest","🌲 forest"),
             ("blood","mod_blood","🩸 blood"),
@@ -5118,6 +5270,7 @@ async def run():
                     f"/heal on|off     (сейчас: {'on' if mod_heal_enabled() else 'off'})",
                     f"/work on|off     (сейчас: {'on' if mod_work_enabled() else 'off'})",
                     f"/dungeon on|off  (сейчас: {'on' if mod_dungeon_enabled() else 'off'})",
+                    f"/driver on|off|auto (сейчас: {party_driver_mode()}, effective={'driver' if is_party_driver() else 'passive'})",
                     f"/pet on|off      (сейчас: {'on' if mod_pet_enabled() else 'off'})  interval={getattr(CFG,'pet_interval_min_hours',1)}-{getattr(CFG,'pet_interval_max_hours',2)}h",
                     f"/thief on|off    (сейчас: {'on' if mod_thief_enabled() else 'off'})",
                 ])
