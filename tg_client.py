@@ -905,6 +905,12 @@ def mod_dungeon_boarded_chop_enabled() -> bool:
     return _kv_bool("mod_dungeon_boarded_chop", True)
 
 
+def mod_hunter_enabled() -> bool:
+    # Track "Странные следы" automatically ("Выследить").
+    # When disabled, wait 10s and continue with "Вперёд".
+    return _kv_bool("mod_hunter", False)
+
+
 def _lmstudio_enabled() -> bool:
     return bool(getattr(CFG, "lmstudio_base_url", "").strip()) and bool(getattr(CFG, "lmstudio_model", "").strip())
 
@@ -3558,6 +3564,49 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
             await click_button(client, msg, pos=pos_collect)
             return
 
+    # Hunter event: "Странные следы".
+    # If hunter mode is ON -> click "Выследить".
+    # If OFF -> wait 10s and then click "Вперёд".
+    if can_drive_dungeon and dungeon_runtime:
+        low_txt = _normalize_ru(txt_full)
+        pos_track = _find_pos_by_substring(msg, "выслед")
+        pos_forward_local = _find_pos_by_substring(msg, "впер")
+        hunter_room = ("странные следы" in low_txt) and (("свежие следы" in low_txt) or ("опытный охотник" in low_txt))
+        hunter_wait_key = "dungeon_hunter_wait_until_ts"
+        now_ts = _now_ts()
+        wait_until = float(get_kv(hunter_wait_key, "0") or 0.0)
+
+        if hunter_room and (pos_track is not None):
+            if mod_hunter_enabled():
+                d = human_delay_combat("battle")
+                log.info("🏹 Данж: hunter=on, жму 'Выследить' через %.2fs", d)
+                await asyncio.sleep(d)
+                await click_button(client, msg, pos=pos_track)
+                _kv_set(hunter_wait_key, "0")
+                return
+
+            if wait_until <= now_ts:
+                wait_until = now_ts + 10.0
+                _kv_set(hunter_wait_key, f"{wait_until:.3f}")
+                log.info("⏱️ Данж: hunter=off, старт паузы 10s перед 'Вперёд'")
+
+            left = max(0.0, wait_until - now_ts)
+            if left > 0 and pos_forward_local is not None:
+                log.info("⏱️ Данж: hunter-пауза, осталось %.1fs", left)
+                return
+
+            if pos_forward_local is not None:
+                try:
+                    await _send_set_command(client, 2)
+                except Exception:
+                    pass
+                d = human_delay_combat("battle")
+                log.info("➡️ Данж: hunter=off, пауза завершена, жму 'Вперёд' через %.2fs", d)
+                await asyncio.sleep(d)
+                await click_button(client, msg, pos=pos_forward_local)
+                _kv_set(hunter_wait_key, "0")
+                return
+
     # Race altars event:
     # touch only "your" altar (by configured race), otherwise wait 10s and continue.
     if can_drive_dungeon and dungeon_runtime:
@@ -5710,6 +5759,7 @@ async def run():
             ("boarded","mod_dungeon_boarded_chop","🪓 boarded_chop"),
             ("rubble","mod_dungeon_rubble_break","⛏️ rubble_break"),
             ("grave","mod_dungeon_grave_open","⚰️ grave_open"),
+            ("hunter","mod_hunter","🏹 hunter"),
             ("pet","mod_pet","🐾 pet"),
             ("thief","mod_thief","🦝 thief"),
         ]:
@@ -5735,6 +5785,7 @@ async def run():
                     f"/boarded on|off  (сейчас: {'on' if mod_dungeon_boarded_chop_enabled() else 'off'})",
                     f"/rubble on|off   (сейчас: {'on' if mod_dungeon_rubble_break_enabled() else 'off'})",
                     f"/grave on|off    (сейчас: {'on' if mod_dungeon_grave_open_enabled() else 'off'})",
+                    f"/hunter on|off   (сейчас: {'on' if mod_hunter_enabled() else 'off'})",
                     f"/driver on|off|auto (сейчас: {party_driver_mode()}, effective={'driver' if is_party_driver() else 'passive'})",
                     f"/pet on|off      (сейчас: {'on' if mod_pet_enabled() else 'off'})  interval={getattr(CFG,'pet_interval_min_hours',1)}-{getattr(CFG,'pet_interval_max_hours',2)}h",
                     f"/thief on|off    (сейчас: {'on' if mod_thief_enabled() else 'off'})",
