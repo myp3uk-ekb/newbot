@@ -3656,7 +3656,9 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
             altar_race = "raccoon"
         elif ("бастет" in low_txt) or ("для рыс" in low_txt):
             altar_race = "lynx"
-        my_race = (get_kv("dungeon_race") or getattr(CFG, "dungeon_race", "") or "").strip().lower()
+        race_from_kv_raw = (get_kv("dungeon_race") or "").strip().lower()
+        race_from_cfg_raw = (getattr(CFG, "dungeon_race", "") or "").strip().lower()
+        my_race = race_from_kv_raw or race_from_cfg_raw
         # If altar wait was started on a previous message, it may expire on a
         # later message that no longer contains altar text. Complete the pause
         # as soon as any forward button appears.
@@ -3677,9 +3679,29 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
         if is_altar_room and (pos_touch is not None):
             race_known = my_race in ("fox", "raccoon", "lynx")
             race_match = bool(race_known and altar_race and (my_race == altar_race))
+            legacy_switch_touch = (mod_dungeon_altar_1000_touch_enabled() if is_altar_1000 else mod_dungeon_altar_touch_enabled())
             # Backward-compatible fallback:
             # if race is unknown or altar race can't be inferred, use legacy switches.
-            allow_touch = race_match or (not race_known) or (not altar_race and (mod_dungeon_altar_1000_touch_enabled() if is_altar_1000 else mod_dungeon_altar_touch_enabled()))
+            allow_touch = race_match or (not race_known) or (not altar_race and legacy_switch_touch)
+            if race_match:
+                decision_reason = "race_match"
+            elif not race_known:
+                decision_reason = "race_unknown_fallback"
+            elif not altar_race and legacy_switch_touch:
+                decision_reason = "altar_unknown_legacy_switch"
+            else:
+                decision_reason = "race_mismatch_wait"
+            log.info(
+                "🐾 Данж: статус алтаря перед нажатием: сохраненная_раса=%s, раса_из_конфига=%s, используемая_раса=%s, раса_алтаря=%s, race_known=%s, race_match=%s, allow_touch=%s, причина=%s",
+                race_from_kv_raw or "<empty>",
+                race_from_cfg_raw or "<empty>",
+                my_race or "<empty>",
+                altar_race or "unknown",
+                "yes" if race_known else "no",
+                "yes" if race_match else "no",
+                "yes" if allow_touch else "no",
+                decision_reason,
+            )
             wait_seconds = 10.0
             if not allow_touch:
                 wait_until = float(get_kv(wait_key, "0") or 0.0)
