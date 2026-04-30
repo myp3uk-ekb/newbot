@@ -3447,7 +3447,15 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
     if can_drive_dungeon and dungeon_runtime:
         low_txt = _normalize_ru(txt_full)
         pos_fire = _find_pos_by_substring(msg, "разж")
-        if ("это костер" in low_txt or "это костёр" in low_txt) and (pos_fire is not None):
+        # Campfire descriptions vary (e.g. "Перед вами Костер!").
+        # Trigger on broader campfire cues to avoid missing the ignite action.
+        campfire_prompt = (
+            ("костер" in low_txt)
+            or ("костёр" in low_txt)
+            or ("разжечь огонь" in low_txt)
+            or ("меч" in low_txt and "безопас" in low_txt)
+        )
+        if campfire_prompt and (pos_fire is not None):
             try:
                 await _send_set_command(client, 2)  # E2: navigation/util
             except Exception:
