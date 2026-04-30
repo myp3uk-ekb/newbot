@@ -111,12 +111,13 @@ def parse_hp_any(text: str) -> tuple[int | None, int | None]:
 
 
 def _parse_race_from_character_text(text: str) -> str | None:
-    t = (text or "").lower()
-    if "рысь" in t:
+    t = _normalize_ru(text or "")
+    # Prefer explicit race cues from character header/effects text.
+    if any(k in t for k in ("рысь", "бастет", "для рыс")):
         return "lynx"
-    if "енот" in t:
+    if any(k in t for k in ("енот", "тануки", "для енот")):
         return "raccoon"
-    if "лис" in t:
+    if any(k in t for k in ("лис", "лиса", "инари", "для лис")):
         return "fox"
     return None
 
@@ -125,11 +126,10 @@ def _learn_dungeon_race_from_character(text: str) -> None:
     """Update persisted dungeon race from /character dump when possible."""
     if not text:
         return
-    low = text.lower()
-    if ("боевой рейтинг" not in low) and ("временные эффекты" not in low):
-        return
-    # Header line is usually "<race> <name> [lvl]".
-    if not RE_CHARACTER_RACE_LINE.search(text):
+    low = _normalize_ru(text)
+    # Accept both classic /character dumps and compact variants where only
+    # the header with level is visible.
+    if ("боевой рейтинг" not in low) and ("временные эффекты" not in low) and ("[" not in text):
         return
     race = _parse_race_from_character_text(text)
     if race not in ("fox", "raccoon", "lynx"):
@@ -3690,7 +3690,7 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
                 left = max(0.0, wait_until - now_ts)
                 if left > 0 and pos_forward_local is not None:
                     log.info("🐾 Данж: ожидание у алтаря, осталось %.1fs", left)
-                    return
+                    await asyncio.sleep(left)
 
                 if pos_forward_local is not None:
                     try:
