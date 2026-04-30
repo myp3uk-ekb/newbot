@@ -137,7 +137,9 @@ def _learn_dungeon_race_from_character(text: str) -> None:
     prev = (get_kv("dungeon_race") or "").strip().lower()
     if prev != race:
         _kv_set("dungeon_race", race)
-        log.info("🧬 CHARACTER: определена раса '%s', сохраняю для алтарей", race)
+        log.info("🧬 CHARACTER: определена раса '%s', сохраняю для алтарей (prev=%s)", race, prev or "<empty>")
+    else:
+        log.info("🧬 CHARACTER: раса подтверждена '%s' (без изменений)", race)
 
 def _clean_item_name(s: str) -> str:
     # drop durability " 59/60" and bracket tiers "[5]" at end if present
