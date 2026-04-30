@@ -89,6 +89,7 @@ RE_BACKPACK_ITEM = re.compile(r"^(/i_\d+)\s+(.+)$", re.MULTILINE)
 RE_DUR = re.compile(r"(\d+)\s*/\s*(\d+)")
 RE_SLOT_INLINE = re.compile(r"/i_(h|b|r|l|a1|a2|a3)\s+[^:]+:\s*(.+?)(?=\s+/i_(?:h|b|r|l|a1|a2|a3|\d+)\b|$)", re.IGNORECASE | re.DOTALL)
 RE_BACKPACK_INLINE = re.compile(r"(/i_\d+)\s+(.+?)(?=\s+/i_(?:h|b|r|l|a1|a2|a3|\d+)\b|$)", re.IGNORECASE | re.DOTALL)
+RE_CHARACTER_RACE_LINE = re.compile(r"^\s*[^:\n]{1,64}\s*\[(?:\d+)\]", re.MULTILINE)
 
 
 def parse_hp_from_text(text: str) -> tuple[int | None, int | None]:
@@ -107,6 +108,36 @@ def parse_hp_any(text: str) -> tuple[int | None, int | None]:
     missing symbol and HP snapshots continue to update.
     """
     return parse_hp_from_text(text)
+
+
+def _parse_race_from_character_text(text: str) -> str | None:
+    t = (text or "").lower()
+    if "рысь" in t:
+        return "lynx"
+    if "енот" in t:
+        return "raccoon"
+    if "лис" in t:
+        return "fox"
+    return None
+
+
+def _learn_dungeon_race_from_character(text: str) -> None:
+    """Update persisted dungeon race from /character dump when possible."""
+    if not text:
+        return
+    low = text.lower()
+    if ("боевой рейтинг" not in low) and ("временные эффекты" not in low):
+        return
+    # Header line is usually "<race> <name> [lvl]".
+    if not RE_CHARACTER_RACE_LINE.search(text):
+        return
+    race = _parse_race_from_character_text(text)
+    if race not in ("fox", "raccoon", "lynx"):
+        return
+    prev = (get_kv("dungeon_race") or "").strip().lower()
+    if prev != race:
+        _kv_set("dungeon_race", race)
+        log.info("🧬 CHARACTER: определена раса '%s', сохраняю для алтарей", race)
 
 def _clean_item_name(s: str) -> str:
     # drop durability " 59/60" and bracket tiers "[5]" at end if present
@@ -2953,6 +2984,7 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
     log.info(f"🧩 {kind} msg {msg.id}: {txt[:180]!r}")
     low_full = _normalize_ru(txt_full)
     _maybe_refresh_party_identity_from_text(txt_full)
+    _learn_dungeon_race_from_character(txt_full)
 
     # Party chat nudge: "Go" means "try to inspect/unstick and keep moving".
     # We store a short-lived flag and use it in dungeon handlers below.
@@ -3622,7 +3654,7 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
             altar_race = "raccoon"
         elif ("бастет" in low_txt) or ("для рыс" in low_txt):
             altar_race = "lynx"
-        my_race = (getattr(CFG, "dungeon_race", "") or "").strip().lower()
+        my_race = (get_kv("dungeon_race") or getattr(CFG, "dungeon_race", "") or "").strip().lower()
         # If altar wait was started on a previous message, it may expire on a
         # later message that no longer contains altar text. Complete the pause
         # as soon as any forward button appears.
