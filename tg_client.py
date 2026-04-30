@@ -892,6 +892,18 @@ def mod_dungeon_altar_1000_touch_enabled() -> bool:
     # Separate switch for "Алтарь Тысячелапого"
     return _kv_bool("mod_dungeon_altar_1000_touch", False)
 
+def mod_dungeon_rubble_break_enabled() -> bool:
+    # Break "Каменный завал" automatically ("Разобрать")
+    return _kv_bool("mod_dungeon_rubble_break", True)
+
+def mod_dungeon_grave_open_enabled() -> bool:
+    # Open "Могила" automatically ("Вскрыть")
+    return _kv_bool("mod_dungeon_grave_open", True)
+
+def mod_dungeon_boarded_chop_enabled() -> bool:
+    # Chop "Заколоченный проход" automatically ("Прорубить")
+    return _kv_bool("mod_dungeon_boarded_chop", True)
+
 
 def _lmstudio_enabled() -> bool:
     return bool(getattr(CFG, "lmstudio_base_url", "").strip()) and bool(getattr(CFG, "lmstudio_model", "").strip())
@@ -3627,28 +3639,99 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
     if can_drive_dungeon and dungeon_runtime:
         low_txt = _normalize_ru(txt_full)
         pos_forward_local = _find_pos_by_substring(msg, "впер")
+        pos_break_local = _find_pos_by_substring(msg, "разоб")
+        pos_open_grave_local = _find_pos_by_substring(msg, "вскры")
         pos_chop_local = _find_pos_by_substring(msg, "проруб")
         boarded_room = ("заколочен" in low_txt) or ("заколоченный проход" in low_txt)
+        rubble_room = ("каменный завал" in low_txt)
+        grave_room = ("могила" in low_txt)
         wait_key = "dungeon_boarded_wait_until_ts"
+        rubble_wait_key = "dungeon_rubble_wait_until_ts"
+        grave_wait_key = "dungeon_grave_wait_until_ts"
         now_ts = _now_ts()
 
-        if boarded_room:
-            wait_until = float(get_kv(wait_key, "0") or 0.0)
+        if grave_room:
+            if mod_dungeon_grave_open_enabled() and pos_open_grave_local is not None:
+                d = human_delay_combat("battle")
+                log.info("⚰️ Данж: могила, жму 'Вскрыть' через %.2fs", d)
+                await asyncio.sleep(d)
+                await click_button(client, msg, pos=pos_open_grave_local)
+                return
+
+            wait_until = float(get_kv(grave_wait_key, "0") or 0.0)
             if wait_until <= now_ts:
-                wait_until = now_ts + 15.0
-                _kv_set(wait_key, f"{wait_until:.3f}")
-                log.info("🪓 Данж: заколоченный проход, старт паузы 15s")
+                wait_until = now_ts + 10.0
+                _kv_set(grave_wait_key, f"{wait_until:.3f}")
+                log.info("⏱️ Данж: могила (mod off), старт паузы 10s")
 
             left = max(0.0, wait_until - now_ts)
             if left > 0:
-                if pos_chop_local is not None:
-                    d = human_delay_combat("battle")
-                    log.info("🪓 Данж: жму 'Прорубить' через %.2fs (до авто-движения %.1fs)", d, left)
-                    await asyncio.sleep(d)
-                    await click_button(client, msg, pos=pos_chop_local)
-                    return
                 if pos_forward_local is not None:
-                    log.info("🪓 Данж: жду разбор прохода, осталось %.1fs", left)
+                    log.info("⏱️ Данж: жду у могилы, осталось %.1fs", left)
+                return
+
+            if pos_forward_local is not None:
+                try:
+                    await _send_set_command(client, 2)
+                except Exception:
+                    pass
+                d = human_delay_combat("battle")
+                log.info("➡️ Данж: пауза у могилы завершена, жму 'Вперёд' через %.2fs", d)
+                await asyncio.sleep(d)
+                await click_button(client, msg, pos=pos_forward_local)
+                _kv_set(grave_wait_key, "0")
+                return
+
+        if rubble_room:
+            if mod_dungeon_rubble_break_enabled() and pos_break_local is not None:
+                d = human_delay_combat("battle")
+                log.info("⛏️ Данж: каменный завал, жму 'Разобрать' через %.2fs", d)
+                await asyncio.sleep(d)
+                await click_button(client, msg, pos=pos_break_local)
+                return
+
+            wait_until = float(get_kv(rubble_wait_key, "0") or 0.0)
+            if wait_until <= now_ts:
+                wait_until = now_ts + 10.0
+                _kv_set(rubble_wait_key, f"{wait_until:.3f}")
+                log.info("⏱️ Данж: каменный завал (mod off), старт паузы 10s")
+
+            left = max(0.0, wait_until - now_ts)
+            if left > 0:
+                if pos_forward_local is not None:
+                    log.info("⏱️ Данж: жду у завала, осталось %.1fs", left)
+                return
+
+            if pos_forward_local is not None:
+                try:
+                    await _send_set_command(client, 2)
+                except Exception:
+                    pass
+                d = human_delay_combat("battle")
+                log.info("➡️ Данж: пауза у завала завершена, жму 'Вперёд' через %.2fs", d)
+                await asyncio.sleep(d)
+                await click_button(client, msg, pos=pos_forward_local)
+                _kv_set(rubble_wait_key, "0")
+                return
+
+        if boarded_room:
+            if mod_dungeon_boarded_chop_enabled() and pos_chop_local is not None:
+                d = human_delay_combat("battle")
+                log.info("🪓 Данж: заколоченный проход, жму 'Прорубить' через %.2fs", d)
+                await asyncio.sleep(d)
+                await click_button(client, msg, pos=pos_chop_local)
+                return
+
+            wait_until = float(get_kv(wait_key, "0") or 0.0)
+            if wait_until <= now_ts:
+                wait_until = now_ts + 10.0
+                _kv_set(wait_key, f"{wait_until:.3f}")
+                log.info("⏱️ Данж: заколоченный проход (mod off), старт паузы 10s")
+
+            left = max(0.0, wait_until - now_ts)
+            if left > 0:
+                if pos_forward_local is not None:
+                    log.info("⏱️ Данж: жду у заколоченного прохода, осталось %.1fs", left)
                     return
 
             if pos_forward_local is not None:
@@ -5624,6 +5707,9 @@ async def run():
             ("dungeon","mod_dungeon","🕸 dungeon"),
             ("altar","mod_dungeon_altar_touch","🐾 altar_touch"),
             ("altar1000","mod_dungeon_altar_1000_touch","🕷 altar1000_touch"),
+            ("boarded","mod_dungeon_boarded_chop","🪓 boarded_chop"),
+            ("rubble","mod_dungeon_rubble_break","⛏️ rubble_break"),
+            ("grave","mod_dungeon_grave_open","⚰️ grave_open"),
             ("pet","mod_pet","🐾 pet"),
             ("thief","mod_thief","🦝 thief"),
         ]:
@@ -5646,6 +5732,9 @@ async def run():
                     f"/dungeon on|off  (сейчас: {'on' if mod_dungeon_enabled() else 'off'})",
                     f"/altar on|off    (сейчас: {'on' if mod_dungeon_altar_touch_enabled() else 'off'})",
                     f"/altar1000 on|off (сейчас: {'on' if mod_dungeon_altar_1000_touch_enabled() else 'off'})",
+                    f"/boarded on|off  (сейчас: {'on' if mod_dungeon_boarded_chop_enabled() else 'off'})",
+                    f"/rubble on|off   (сейчас: {'on' if mod_dungeon_rubble_break_enabled() else 'off'})",
+                    f"/grave on|off    (сейчас: {'on' if mod_dungeon_grave_open_enabled() else 'off'})",
                     f"/driver on|off|auto (сейчас: {party_driver_mode()}, effective={'driver' if is_party_driver() else 'passive'})",
                     f"/pet on|off      (сейчас: {'on' if mod_pet_enabled() else 'off'})  interval={getattr(CFG,'pet_interval_min_hours',1)}-{getattr(CFG,'pet_interval_max_hours',2)}h",
                     f"/thief on|off    (сейчас: {'on' if mod_thief_enabled() else 'off'})",
