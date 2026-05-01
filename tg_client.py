@@ -3530,11 +3530,17 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
     nxt_stage = (get_kv("dungeon_next_key_stage", "") or "").strip()
     nxt_target = (get_kv("dungeon_next_key_target", "") or "").strip()
     nxt_tier = (get_kv("dungeon_next_key_tier", "") or "").strip().upper()
-    if nxt_stage and nxt_target and state.buttons:
+    # Safety gate: key-chain navigation must run only on neutral/party-like screens.
+    # Some forest menus (e.g. Tower) can also contain a "Подземелья" button, and
+    # without this guard we may misclick into dungeons unintentionally.
+    if nxt_stage and nxt_target and state.buttons and state.stage == "other":
         btn_labels = [((b.btn_text or b.name or "").strip()) for b in state.buttons]
         low_buttons = [_normalize_ru(t) for t in btn_labels]
         if nxt_stage == "open_party":
-            pos = _find_pos_by_substring(msg, "подзем")
+            # IMPORTANT: click only the dedicated "/party -> Подземелья" button.
+            # Using a broad substring ("подзем") misfires on other menus like
+            # Pierre's key crafting list ("Темнейшее подземелье", etc.).
+            pos = _find_pos_by_exact_label(msg, ["Подземелья"])
             if pos is not None:
                 d = human_delay_combat("battle")
                 log.info("🗝️ Данж-цепочка: в /party жму 'Подземелья' через %.2fs", d)
