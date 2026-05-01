@@ -3154,6 +3154,15 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
     pending_mode = (get_kv("pending_mode", "") or "").strip().lower()
     stop_cast_active = ((get_kv("fish_stop_cast", "0") == "1") and pending_mode in ("forest", "pet"))
     if is_fishing_or_rodflow and not mod_fishing_enabled() and not stop_cast_active:
+        # If stale fishing screen is still visible after /fish off (e.g. party invite),
+        # close it proactively by pressing cancel.
+        pos_cancel = _find_pos_by_substring(msg, "отмен")
+        if pos_cancel is not None:
+            d = random.uniform(0.2, 0.8)
+            log.info("🎛 Рыбалка выключена (/fish off) — закрываю рыбалку кнопкой 'Отмена' через %.2fs.", d)
+            await asyncio.sleep(d)
+            await click_button(client, msg, pos=pos_cancel)
+            return
         log.info("🎛 Рыбалка выключена (/fish off) — игнорирую рыболовные действия.")
         return
 
