@@ -2614,10 +2614,13 @@ async def _handle_party_event(client: TelegramClient, msg: Message, state) -> bo
             _party_enter_modes("invite_accept")
             set_party_active(True)
             set_kv("party_last_event", "invite_accept")
-            try:
-                await _use_preferred_dungeon_buffs(client, reason="party_invite_accept", force=True)
-            except Exception as e:
-                log.warning("🤝 PARTY: не удалось применить стартовые бафы: %s", e)
+            if get_kv("party_buffs_applied", "0") != "1":
+                set_kv("party_buffs_applied", "1")
+                try:
+                    await _use_preferred_dungeon_buffs(client, reason="party_invite_accept", force=True)
+                except Exception as e:
+                    log.warning("🤝 PARTY: не удалось применить стартовые бафы: %s", e)
+                    set_kv("party_buffs_applied", "0")
             return True
 
         # If we cannot click (no buttons), just mark active and wait for join msg.
