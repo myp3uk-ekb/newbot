@@ -3767,8 +3767,15 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
     if can_drive_dungeon and dungeon_runtime:
         low_txt = _normalize_ru(txt_full)
         pos_touch = _find_pos_by_substring(msg, "прикосн")
+        if pos_touch is None:
+            # Some altar variants use pet-like wording instead of "Прикоснуться".
+            pos_touch = _find_pos_by_substring(msg, "поглад")
+        if pos_touch is None:
+            pos_touch = _find_pos_by_substring(msg, "почес")
+        if pos_touch is None:
+            pos_touch = _find_pos_by_substring(msg, "приласк")
         pos_forward_local = _find_pos_by_substring(msg, "впер")
-        is_altar_room = (("алтар" in low_txt) or ("бастет" in low_txt) or ("инари" in low_txt) or ("тануки" in low_txt) or ("мары" in low_txt) or ("мара" in low_txt))
+        is_altar_room = (("алтар" in low_txt) or ("бастет" in low_txt) or ("инари" in low_txt) or ("тануки" in low_txt) or ("мары" in low_txt) or ("мара" in low_txt) or ("тысячелап" in low_txt))
         is_altar_1000 = ("тысячелап" in low_txt)
         is_altar_mara = (("мары" in low_txt) or ("мара" in low_txt))
         altar_race = None
