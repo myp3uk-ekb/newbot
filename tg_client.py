@@ -402,6 +402,13 @@ async def _use_preferred_dungeon_buffs(client: TelegramClient, *, reason: str, f
       power: dragon > bear > wolf
     """
     now = time.time()
+    # Buff consumables are not usable in active combat screens.
+    # Also avoid opening inventory while forest/battle loops are in control.
+    ui_stage = (get_kv("last_stage", "") or "").strip().lower()
+    if ui_stage in ("battle", "forest"):
+        log.info("🧪 buff-use skipped (%s): ui_stage=%s", reason, ui_stage or "?")
+        return False
+
     if not force:
         last = float(get_kv("dungeon_buffs_last_ts", "0") or 0.0)
         if (now - last) < 25.0:
@@ -455,16 +462,36 @@ async def _use_preferred_dungeon_buffs(client: TelegramClient, *, reason: str, f
     used = 0
     for group, item_cmd, patterns, group_cd_sec in plan:
         await _human_sleep(kind="inventory", lo=0.9, hi=1.9, note=f"buff {item_cmd}")
-        await client.send_message(CFG.game_chat, item_cmd)
-        # В текущем UI карточку предмета часто нужно подтверждать кликом "Использовать"
-        # (не только для фрукта богатства). Пытаемся нажать кнопку для всех бафов.
-        try:
-            await asyncio.sleep(0.9)
-            m = await _get_recent_bot_message_with_buttons(client, CFG.game_chat, limit=10)
-            if m is not None:
-                await click_button_contains(client, m, ["использовать", "▶️ использовать", "▶ использовать"])
-        except Exception as e:
-            log.warning("🧪 buff-use click failed for %s: %s", item_cmd, e)
+        # Fast path: use quantity command directly to avoid opening each card.
+        # Example command accepted by the game: "Использовать 24 2".
+        qty_by_group = {
+            "wealth": 1,
+            "vitality": 2,
+            "combat_xp": 2,
+            "regen": 2,
+            "armor": 2,
+            "power": 2,
+        }
+        qty = int(qty_by_group.get(group, 1))
+        m_id = re.search(r"/i_(\d+)\b", item_cmd or "")
+        used_fast = False
+        if m_id:
+            fast_cmd = f"Использовать {m_id.group(1)} {qty}"
+            try:
+                await client.send_message(CFG.game_chat, fast_cmd)
+                used_fast = True
+            except Exception as e:
+                log.warning("🧪 fast buff-use failed for %s via %r: %s", item_cmd, fast_cmd, e)
+        if not used_fast:
+            await client.send_message(CFG.game_chat, item_cmd)
+            # Fallback for UIs that require opening card + clicking "Использовать".
+            try:
+                await asyncio.sleep(0.9)
+                m = await _get_recent_bot_message_with_buttons(client, CFG.game_chat, limit=10)
+                if m is not None:
+                    await click_button_contains(client, m, ["использовать", "▶️ использовать", "▶ использовать"])
+            except Exception as e:
+                log.warning("🧪 buff-use click failed for %s: %s", item_cmd, e)
         used += 1
         _kv_set(f"dungeon_buff_next_ts:{group}", f"{(now + group_cd_sec):.3f}")
 
@@ -3126,19 +3153,10 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
     party_passive_in_dungeon = is_party_active() and dungeon_runtime and (not is_party_driver())
     can_drive_dungeon = (not party_passive_in_dungeon)
 
-    # Immediate key-acquire trigger (e.g. "получает 🗝Ключ шипов III ..."):
-    # prepare chain without waiting for explicit post-dungeon completion branch.
-    key_detected = _detect_dungeon_key_target(txt_full)
-    if key_detected and (get_kv("dungeon_next_key_stage", "") or "").strip() == "":
-        key_target_now, key_tier_now = key_detected
-        _kv_set("dungeon_next_key_target", key_target_now)
-        _kv_set("dungeon_next_key_tier", key_tier_now or "")
-        _kv_set("dungeon_next_key_stage", "open_party")
-        log.info("🗝️ Данж-цепочка: обнаружен ключ (%s/%s) → готовлю /party", key_target_now, key_tier_now or "?")
-        # Ask /party once if we're not already on party screen.
-        if "группа" not in low_full and "/p_" not in txt_full:
-            await _human_sleep(kind="mode_switch", lo=0.7, hi=1.7, note="key acquired -> /party")
-            await client.send_message(CFG.game_chat, "/party")
+    # NOTE: auto-relaunch chain must start ONLY from explicit post-dungeon completion
+    # flow (after pressing "Завершить" -> inventory check). Do not arm from generic
+    # "key acquired" messages, otherwise manual key crafting/buying can trigger
+    # unintended /party navigation.
 
     # Post-dungeon key check flow:
     # 1) after pressing "Завершить", request /inventory
@@ -3530,11 +3548,24 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
     nxt_stage = (get_kv("dungeon_next_key_stage", "") or "").strip()
     nxt_target = (get_kv("dungeon_next_key_target", "") or "").strip()
     nxt_tier = (get_kv("dungeon_next_key_tier", "") or "").strip().upper()
-    if nxt_stage and nxt_target and state.buttons:
+    # Safety gate: key-chain navigation must run only on neutral/party-like screens.
+    # Some forest menus (e.g. Tower) can also contain a "Подземелья" button, and
+    # without this guard we may misclick into dungeons unintentionally.
+    if nxt_stage and nxt_target and state.buttons and state.stage == "other":
         btn_labels = [((b.btn_text or b.name or "").strip()) for b in state.buttons]
         low_buttons = [_normalize_ru(t) for t in btn_labels]
+        low_txt_chain = _normalize_ru(txt_full)
         if nxt_stage == "open_party":
-            pos = _find_pos_by_substring(msg, "подзем")
+            # Tower screen can also have a "Подземелья" button.
+            # Only allow this step on party-like menu where companion buttons
+            # such as "Группа"/"Герои" are present.
+            has_party_nav = any(("группа" in b) or ("герои" in b) for b in low_buttons)
+            if not has_party_nav:
+                return
+            # IMPORTANT: click only the dedicated "/party -> Подземелья" button.
+            # Using a broad substring ("подзем") misfires on other menus like
+            # Pierre's key crafting list ("Темнейшее подземелье", etc.).
+            pos = _find_pos_by_exact_label(msg, ["Подземелья"])
             if pos is not None:
                 d = human_delay_combat("battle")
                 log.info("🗝️ Данж-цепочка: в /party жму 'Подземелья' через %.2fs", d)
@@ -3543,6 +3574,11 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
                     _kv_set("dungeon_next_key_stage", "choose_dungeon")
                 return
         elif nxt_stage == "choose_dungeon":
+            # Run dungeon choice only on the actual party-dungeon chooser screen.
+            # Pierre's key crafting menu has similar dungeon names, but is not a run launch UI.
+            if not (("приключени" in low_txt_chain) and ("для групп" in low_txt_chain)):
+                _kv_set("dungeon_next_key_stage", "open_party")
+                return
             want = "темнейш" if nxt_target == "night" else "катакомб"
             pos = None
             # Prefer exact tier match when key has known level (I..V).
