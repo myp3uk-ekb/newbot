@@ -3126,19 +3126,10 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
     party_passive_in_dungeon = is_party_active() and dungeon_runtime and (not is_party_driver())
     can_drive_dungeon = (not party_passive_in_dungeon)
 
-    # Immediate key-acquire trigger (e.g. "получает 🗝Ключ шипов III ..."):
-    # prepare chain without waiting for explicit post-dungeon completion branch.
-    key_detected = _detect_dungeon_key_target(txt_full)
-    if key_detected and (get_kv("dungeon_next_key_stage", "") or "").strip() == "":
-        key_target_now, key_tier_now = key_detected
-        _kv_set("dungeon_next_key_target", key_target_now)
-        _kv_set("dungeon_next_key_tier", key_tier_now or "")
-        _kv_set("dungeon_next_key_stage", "open_party")
-        log.info("🗝️ Данж-цепочка: обнаружен ключ (%s/%s) → готовлю /party", key_target_now, key_tier_now or "?")
-        # Ask /party once if we're not already on party screen.
-        if "группа" not in low_full and "/p_" not in txt_full:
-            await _human_sleep(kind="mode_switch", lo=0.7, hi=1.7, note="key acquired -> /party")
-            await client.send_message(CFG.game_chat, "/party")
+    # NOTE: auto-relaunch chain must start ONLY from explicit post-dungeon completion
+    # flow (after pressing "Завершить" -> inventory check). Do not arm from generic
+    # "key acquired" messages, otherwise manual key crafting/buying can trigger
+    # unintended /party navigation.
 
     # Post-dungeon key check flow:
     # 1) after pressing "Завершить", request /inventory
