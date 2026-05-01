@@ -402,6 +402,13 @@ async def _use_preferred_dungeon_buffs(client: TelegramClient, *, reason: str, f
       power: dragon > bear > wolf
     """
     now = time.time()
+    # Buff consumables are not usable in active combat screens.
+    # Also avoid opening inventory while forest/battle loops are in control.
+    ui_stage = (get_kv("last_stage", "") or "").strip().lower()
+    if ui_stage in ("battle", "forest"):
+        log.info("🧪 buff-use skipped (%s): ui_stage=%s", reason, ui_stage or "?")
+        return False
+
     if not force:
         last = float(get_kv("dungeon_buffs_last_ts", "0") or 0.0)
         if (now - last) < 25.0:
@@ -455,16 +462,36 @@ async def _use_preferred_dungeon_buffs(client: TelegramClient, *, reason: str, f
     used = 0
     for group, item_cmd, patterns, group_cd_sec in plan:
         await _human_sleep(kind="inventory", lo=0.9, hi=1.9, note=f"buff {item_cmd}")
-        await client.send_message(CFG.game_chat, item_cmd)
-        # В текущем UI карточку предмета часто нужно подтверждать кликом "Использовать"
-        # (не только для фрукта богатства). Пытаемся нажать кнопку для всех бафов.
-        try:
-            await asyncio.sleep(0.9)
-            m = await _get_recent_bot_message_with_buttons(client, CFG.game_chat, limit=10)
-            if m is not None:
-                await click_button_contains(client, m, ["использовать", "▶️ использовать", "▶ использовать"])
-        except Exception as e:
-            log.warning("🧪 buff-use click failed for %s: %s", item_cmd, e)
+        # Fast path: use quantity command directly to avoid opening each card.
+        # Example command accepted by the game: "Использовать 24 2".
+        qty_by_group = {
+            "wealth": 1,
+            "vitality": 2,
+            "combat_xp": 2,
+            "regen": 2,
+            "armor": 2,
+            "power": 2,
+        }
+        qty = int(qty_by_group.get(group, 1))
+        m_id = re.search(r"/i_(\d+)\b", item_cmd or "")
+        used_fast = False
+        if m_id:
+            fast_cmd = f"Использовать {m_id.group(1)} {qty}"
+            try:
+                await client.send_message(CFG.game_chat, fast_cmd)
+                used_fast = True
+            except Exception as e:
+                log.warning("🧪 fast buff-use failed for %s via %r: %s", item_cmd, fast_cmd, e)
+        if not used_fast:
+            await client.send_message(CFG.game_chat, item_cmd)
+            # Fallback for UIs that require opening card + clicking "Использовать".
+            try:
+                await asyncio.sleep(0.9)
+                m = await _get_recent_bot_message_with_buttons(client, CFG.game_chat, limit=10)
+                if m is not None:
+                    await click_button_contains(client, m, ["использовать", "▶️ использовать", "▶ использовать"])
+            except Exception as e:
+                log.warning("🧪 buff-use click failed for %s: %s", item_cmd, e)
         used += 1
         _kv_set(f"dungeon_buff_next_ts:{group}", f"{(now + group_cd_sec):.3f}")
 
