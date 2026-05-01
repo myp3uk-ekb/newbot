@@ -3537,7 +3537,10 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
         btn_labels = [((b.btn_text or b.name or "").strip()) for b in state.buttons]
         low_buttons = [_normalize_ru(t) for t in btn_labels]
         if nxt_stage == "open_party":
-            pos = _find_pos_by_substring(msg, "подзем")
+            # IMPORTANT: click only the dedicated "/party -> Подземелья" button.
+            # Using a broad substring ("подзем") misfires on other menus like
+            # Pierre's key crafting list ("Темнейшее подземелье", etc.).
+            pos = _find_pos_by_exact_label(msg, ["Подземелья"])
             if pos is not None:
                 d = human_delay_combat("battle")
                 log.info("🗝️ Данж-цепочка: в /party жму 'Подземелья' через %.2fs", d)
