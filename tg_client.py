@@ -4010,6 +4010,24 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
                 await client.send_message(CFG.game_chat, "/inventory")
             return
 
+    # Winged treasure-hunter encounter ("Крылатик"/"Клок"):
+    # always proceed in this event chain:
+    # - "Согласиться" on offer screens
+    # - "Подойти" on follow-up post-battle screens
+    if state.stage == "other":
+        low_txt = _normalize_ru(txt_full)
+        if any(k in low_txt for k in ("крылат", "клок", "искатель сокровищ")):
+            pos_accept = _find_pos_by_substring(msg, "соглас")
+            pos_approach = _find_pos_by_substring(msg, "подойт")
+            pos_pick = pos_accept if pos_accept is not None else pos_approach
+            if pos_pick is not None:
+                d = human_delay_combat("battle")
+                action = "Согласиться" if pos_accept is not None else "Подойти"
+                log.info("🪽 Крылатик: жму '%s' через %.2fs", action, d)
+                await asyncio.sleep(d)
+                await click_button(client, msg, pos=pos_pick)
+                return
+
     if not state.can_act or not state.buttons:
         return
 
