@@ -2596,6 +2596,8 @@ async def _handle_party_event(client: TelegramClient, msg: Message, state) -> bo
     has_decline = any("отказ" in (t or "").lower() for t in btns)
 
     if is_invite or (has_accept and has_decline):
+        # Always arm one fresh buff attempt for this invite event.
+        set_kv("party_buffs_applied", "0")
         # Snapshot modes only once per invite chain.
         if get_kv("party_snapshot_done", "0") != "1":
             _party_snapshot_modes()
@@ -2633,13 +2635,12 @@ async def _handle_party_event(client: TelegramClient, msg: Message, state) -> bo
             _party_enter_modes("invite_accept")
             set_party_active(True)
             set_kv("party_last_event", "invite_accept")
-            if get_kv("party_buffs_applied", "0") != "1":
-                set_kv("party_buffs_applied", "1")
-                try:
-                    await _use_preferred_dungeon_buffs(client, reason="party_invite_accept", force=True)
-                except Exception as e:
-                    log.warning("🤝 PARTY: не удалось применить стартовые бафы: %s", e)
-                    set_kv("party_buffs_applied", "0")
+            try:
+                applied = await _use_preferred_dungeon_buffs(client, reason="party_invite_accept", force=True)
+                set_kv("party_buffs_applied", "1" if applied else "0")
+            except Exception as e:
+                log.warning("🤝 PARTY: не удалось применить стартовые бафы: %s", e)
+                set_kv("party_buffs_applied", "0")
             return True
 
         # If we cannot click (no buttons), just mark active and wait for join msg.
