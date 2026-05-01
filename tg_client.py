@@ -3575,7 +3575,8 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
 
     # Party helper: when party is active and only one navigation button is left ("Вперёд"),
     # press it immediately to keep the run moving.
-    if is_party_active() and len(state.buttons) == 1:
+    # IMPORTANT: do this only for an effective party driver.
+    if is_party_active() and is_party_driver() and len(state.buttons) == 1:
         only_btn = _normalize_ru((state.buttons[0].btn_text or state.buttons[0].name or ""))
         if "впер" in only_btn:
             try:
