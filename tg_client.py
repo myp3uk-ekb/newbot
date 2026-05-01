@@ -2600,6 +2600,8 @@ async def _handle_party_event(client: TelegramClient, msg: Message, state) -> bo
         if get_kv("party_snapshot_done", "0") != "1":
             _party_snapshot_modes()
             set_kv("party_snapshot_done", "1")
+            # New invite chain -> allow one fresh buff pass for this party join.
+            set_kv("party_buffs_applied", "0")
 
         log.info("🤝 PARTY: приглашение → принимаю")
         # Stop new casts (but allow existing hook to resolve).
