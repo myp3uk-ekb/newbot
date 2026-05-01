@@ -3200,8 +3200,13 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
     dungeon_runtime = mod_dungeon_enabled() and (dungeon_context_now or now_ts < run_until)
     go_until_ts = float(get_kv("party_go_until_ts", "0") or 0.0)
     go_hint_active = (now_ts < go_until_ts)
-    party_passive_in_dungeon = is_party_active() and dungeon_runtime and (not is_party_driver())
-    can_drive_dungeon = (not party_passive_in_dungeon)
+    party_passive = (party_driver_mode() == "off") or (is_party_active() and (not is_party_driver()))
+    party_passive_in_dungeon = party_passive and dungeon_runtime
+    # Hard gate: passive party role must never click combat/navigation choices.
+    # Includes explicit driver_mode=off even when party_active marker lags.
+    # This prevents non-driver accounts from selecting rooms or attacking when
+    # dungeon context detection is late/ambiguous on transitional screens.
+    can_drive_dungeon = (not party_passive)
     # Passive party role (non-driver) can still perform narrow "scout prep":
     # - equip E2 and press "Осмотреться"
     # - equip E1 when attack screen appears (without clicking attack)
@@ -3397,6 +3402,13 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
     pos_attack = _find_pos_by_substring(msg, "напасть")
     if pos_attack is None:
         pos_attack = _find_pos_by_substring(msg, "в бой")
+    if pos_attack is not None and passive_scout_mode:
+        try:
+            await _send_set_command(client, 1)  # E1: combat set
+        except Exception:
+            pass
+        log.info("⚔️🤝 Данж(passive): найдено 'Напасть/В бой' — переключился на E1 без нажатия")
+        return
     if pos_attack is not None and can_drive_dungeon:
         try:
             await _send_set_command(client, 1)  # E1: combat set
@@ -3408,14 +3420,6 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
         if not await _click_action_button_resilient(client, msg, labels=["Напасть", "В бой"], timeout_sec=4.0):
             log.warning("⚔️ Не удалось нажать 'Напасть' после переключения E1")
         return
-    if pos_attack is not None and passive_scout_mode:
-        try:
-            await _send_set_command(client, 1)  # E1: combat set
-        except Exception:
-            pass
-        log.info("⚔️🤝 Данж(passive): найдено 'Напасть/В бой' — переключился на E1 без нажатия")
-        return
-
     # Lockpick flow in dungeon: switch to E3 and click lock.
     # Do NOT switch back to E2 immediately: chest result messages can arrive
     # while set-switch animation is still in progress, and the `/e_2` response
