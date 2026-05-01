@@ -2606,6 +2606,17 @@ async def _handle_party_event(client: TelegramClient, msg: Message, state) -> bo
         set_kv("fish_stop_cast", "1")
         set_kv("fish_stop_cast_since", str(time.time()))
         set_kv("pending_mode", "party")
+        # If fishing UI is still active, cancel it immediately so inventory/party
+        # actions won't time out behind "Подсечь/Отмена" screen.
+        try:
+            fish_msg = await _get_recent_bot_message_with_buttons(client, CFG.game_chat, limit=12)
+            if fish_msg is not None:
+                fish_labels = " ".join(_normalize_ru(x) for x in _button_labels(fish_msg))
+                if ("подсеч" in fish_labels) and ("отмен" in fish_labels):
+                    await _human_sleep(kind="click", lo=0.25, hi=0.75, note="party invite: cancel fishing first")
+                    await click_button_contains(client, fish_msg, ["Отмена", "✖️Отмена", "✖ Отмена"])
+        except Exception as e:
+            log.debug("party invite pre-cancel fishing skipped: %s", e)
 
         # Click accept if button exists.
         if has_accept:
