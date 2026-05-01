@@ -321,6 +321,12 @@ def parse_message(msg: Message, fish_hook_sub: str, fish_cast_sub: str) -> GameS
     # Other menus also contain sword buttons (e.g. "⚔️Арена", "⚔️В бой!") and must NOT be
     # treated as the forest tier picker, otherwise we will click the wrong thing.
     if any(SWORD in (ch.name or "") for ch in flat):
+        # Dungeon entry buttons in Tower ("Подземелья", "Соло-подземелье") are not
+        # forest tier selectors even though they contain sword+tier markers.
+        # If we classify them as forest, the combat loop may run gear swaps and clicks
+        # in a completely wrong context.
+        if any("подзем" in _normalize(ch.name or "") for ch in flat):
+            return GameState(stage="other", buttons=flat, can_act=False)
         out: list[Choice] = []
         for ch in flat:
             if SWORD not in (ch.name or ""):
