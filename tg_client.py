@@ -401,102 +401,87 @@ async def _use_preferred_dungeon_buffs(client: TelegramClient, *, reason: str, f
       armor: titanium skin > iron skin
       power: dragon > bear > wolf
     """
-    now = time.time()
-    # Buff consumables are not usable in active combat screens.
-    # Also avoid opening inventory while forest/battle loops are in control.
-    ui_stage = (get_kv("last_stage", "") or "").strip().lower()
-    if ui_stage in ("battle", "forest"):
-        log.info("🧪 buff-use skipped (%s): ui_stage=%s", reason, ui_stage or "?")
+    if _BUFF_USE_LOCK.locked():
+        log.info("🧪 buff-use skipped (%s): another buff routine is already running", reason)
         return False
-
-    if not force:
-        last = float(get_kv("dungeon_buffs_last_ts", "0") or 0.0)
-        if (now - last) < 25.0:
+    async with _BUFF_USE_LOCK:
+        now = time.time()
+        ui_stage = (get_kv("last_stage", "") or "").strip().lower()
+        if ui_stage in ("battle", "forest"):
+            log.info("🧪 buff-use skipped (%s): ui_stage=%s", reason, ui_stage or "?")
             return False
-
-    snap = await _fetch_character(client)
-    if not snap:
-        return False
-    backpack = snap.get("backpack", []) or []
-    if not backpack:
-        return False
-
-    effects_raw = await _fetch_character_effects_raw(client)
-    effects_state = _parse_effects_state(effects_raw or "")
-
-    # If negative effects are active, cleanse first to avoid wasting buff consumables.
-    if effects_state["has_negative"]:
-        cleaned = await _try_use_cleansing_potion(client, backpack=backpack)
-        if cleaned:
-            # Re-fetch snapshot so backpack commands stay fresh after using an item.
-            snap = await _fetch_character(client)
-            if not snap:
-                return True
-            backpack = snap.get("backpack", []) or []
-
-    # Top-up buffs to target window, accounting for already active remaining time.
-    spec = (
-        # group, patterns, cooldown, target_minutes, per_item_minutes
-        # Wealth can be shown without explicit remaining timer in /character,
-        # so for this group we rely on "is active" marker + cooldown.
-        ("wealth", ["фрукт богатства"], 90 * 60, 120, 120),
-        ("vitality", ["огромный карась"], 20 * 60, 180, 30),
-        ("combat_xp", ["огромная форель"], 20 * 60, 180, 30),
-        ("regen", ["огромный лосось"], 20 * 60, 180, 30),
-        ("armor", ["титановой кожи", "железной кожи"], 60 * 60, 180, 90),
-        ("power", ["силы дракона", "силы медведя", "силы волка"], 60 * 60, 180, 90),
-    )
-
-    plan: list[tuple[str, str, list[str], int, int]] = []
-    for group, patterns, group_cd_sec, target_min, per_item_min in spec:
-        if group == "wealth" and _effect_group_is_active(effects_state["active_norm"], "wealth"):
-            continue
-        rem_min = _effect_group_remaining_min(effects_state["active_norm"], group)
-        need_min = max(0, int(target_min) - int(rem_min))
-        qty_needed = (need_min + int(per_item_min) - 1) // int(per_item_min)
-        if qty_needed <= 0:
-            continue
-        nxt = float(get_kv(f"dungeon_buff_next_ts:{group}", "0") or 0.0)
-        if (not force) and now < nxt:
-            continue
-        cmd = _find_backpack_item_cmd(backpack, patterns)
-        if cmd:
-            plan.append((group, cmd, patterns, group_cd_sec, int(qty_needed)))
-
-    if not plan:
-        return False
-
-    used = 0
-    for group, item_cmd, patterns, group_cd_sec, qty_needed in plan:
-        await _human_sleep(kind="inventory", lo=0.9, hi=1.9, note=f"buff {item_cmd}")
-        # Fast path: use quantity command directly to avoid opening each card.
-        # Example command accepted by the game: "Использовать 24 2".
-        qty = max(1, int(qty_needed))
-        m_id = re.search(r"/i_(\d+)\b", item_cmd or "")
-        used_fast = False
-        if m_id:
-            fast_cmd = f"Использовать {m_id.group(1)} {qty}"
-            try:
-                await client.send_message(CFG.game_chat, fast_cmd)
-                used_fast = True
-            except Exception as e:
-                log.warning("🧪 fast buff-use failed for %s via %r: %s", item_cmd, fast_cmd, e)
-        if not used_fast:
-            await client.send_message(CFG.game_chat, item_cmd)
-            # Fallback for UIs that require opening card + clicking "Использовать".
-            try:
-                await asyncio.sleep(0.9)
-                m = await _get_recent_bot_message_with_buttons(client, CFG.game_chat, limit=10)
-                if m is not None:
-                    await click_button_contains(client, m, ["использовать", "▶️ использовать", "▶ использовать"])
-            except Exception as e:
-                log.warning("🧪 buff-use click failed for %s: %s", item_cmd, e)
-        used += 1
-        _kv_set(f"dungeon_buff_next_ts:{group}", f"{(now + group_cd_sec):.3f}")
-
-    _kv_set("dungeon_buffs_last_ts", f"{now:.3f}")
-    log.info("🧪 DUNGEON/PARTY buffs applied (%s): %s item(s)", reason, used)
-    return used > 0
+        if not force:
+            last = float(get_kv("dungeon_buffs_last_ts", "0") or 0.0)
+            if (now - last) < 25.0:
+                return False
+        snap = await _fetch_character(client)
+        if not snap:
+            return False
+        backpack = snap.get("backpack", []) or []
+        if not backpack:
+            return False
+        effects_raw = await _fetch_character_effects_raw(client)
+        effects_state = _parse_effects_state(effects_raw or "")
+        if effects_state["has_negative"]:
+            cleaned = await _try_use_cleansing_potion(client, backpack=backpack)
+            if cleaned:
+                snap = await _fetch_character(client)
+                if not snap:
+                    return True
+                backpack = snap.get("backpack", []) or []
+        spec = (
+            ("wealth", ["фрукт богатства"], 90 * 60, 120, 120),
+            ("vitality", ["огромный карась"], 20 * 60, 180, 30),
+            ("combat_xp", ["огромная форель"], 20 * 60, 180, 30),
+            ("regen", ["огромный лосось"], 20 * 60, 180, 30),
+            ("armor", ["титановой кожи", "железной кожи"], 60 * 60, 180, 90),
+            ("power", ["силы дракона", "силы медведя", "силы волка"], 60 * 60, 180, 90),
+        )
+        plan: list[tuple[str, str, list[str], int, int]] = []
+        for group, patterns, group_cd_sec, target_min, per_item_min in spec:
+            if group == "wealth" and _effect_group_is_active(effects_state["active_norm"], "wealth"):
+                continue
+            rem_min = _effect_group_remaining_min(effects_state["active_norm"], group)
+            need_min = max(0, int(target_min) - int(rem_min))
+            qty_needed = (need_min + int(per_item_min) - 1) // int(per_item_min)
+            if qty_needed <= 0:
+                continue
+            nxt = float(get_kv(f"dungeon_buff_next_ts:{group}", "0") or 0.0)
+            if (not force) and now < nxt:
+                continue
+            cmd = _find_backpack_item_cmd(backpack, patterns)
+            if cmd:
+                plan.append((group, cmd, patterns, group_cd_sec, int(qty_needed)))
+        if not plan:
+            return False
+        used = 0
+        for group, item_cmd, patterns, group_cd_sec, qty_needed in plan:
+            await _human_sleep(kind="inventory", lo=1.0, hi=2.1, note=f"buff {item_cmd}")
+            qty = max(1, int(qty_needed))
+            m_id = re.search(r"/i_(\d+)\b", item_cmd or "")
+            used_fast = False
+            if m_id:
+                fast_cmd = f"Использовать {m_id.group(1)} {qty}"
+                try:
+                    await client.send_message(CFG.game_chat, fast_cmd)
+                    used_fast = True
+                except Exception as e:
+                    log.warning("🧪 fast buff-use failed for %s via %r: %s", item_cmd, fast_cmd, e)
+            if not used_fast:
+                await client.send_message(CFG.game_chat, item_cmd)
+                try:
+                    await asyncio.sleep(0.9)
+                    m = await _get_recent_bot_message_with_buttons(client, CFG.game_chat, limit=10)
+                    if m is not None:
+                        await click_button_contains(client, m, ["использовать", "▶️ использовать", "▶ использовать"])
+                except Exception as e:
+                    log.warning("🧪 buff-use click failed for %s: %s", item_cmd, e)
+            used += 1
+            _kv_set(f"dungeon_buff_next_ts:{group}", f"{(now + group_cd_sec):.3f}")
+            await asyncio.sleep(1.0)
+        _kv_set("dungeon_buffs_last_ts", f"{now:.3f}")
+        log.info("🧪 DUNGEON/PARTY buffs applied (%s): %s item(s)", reason, used)
+        return used > 0
 
 
 def _can_apply_dungeon_buffs_now() -> bool:
@@ -517,6 +502,7 @@ def _can_apply_dungeon_buffs_now() -> bool:
 _FETCH_EFFECTS_LOCK = asyncio.Lock()
 _LAST_FETCH_EFFECTS_TS = 0.0
 _FETCH_EFFECTS_MIN_INTERVAL = 2.0
+_BUFF_USE_LOCK = asyncio.Lock()
 
 
 async def _fetch_character_effects_raw(client: TelegramClient, timeout: float = 15.0) -> str | None:
@@ -2661,7 +2647,6 @@ async def _handle_party_event(client: TelegramClient, msg: Message, state) -> bo
         _party_enter_modes("joined")
         set_party_active(True)
         set_kv("party_last_event", "joined" if is_join else "created")
-        set_kv("party_buffs_applied", "0")
         log.info("🤝 PARTY: join/create detected, trying pre-dungeon buffs (reason=%s)",
                  "party_joined" if is_join else "party_created")
         if get_kv("party_buffs_applied", "0") != "1":
