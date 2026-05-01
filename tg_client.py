@@ -3538,6 +3538,12 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
         low_buttons = [_normalize_ru(t) for t in btn_labels]
         low_txt_chain = _normalize_ru(txt_full)
         if nxt_stage == "open_party":
+            # Tower screen can also have a "Подземелья" button.
+            # Only allow this step on party-like menu where companion buttons
+            # such as "Группа"/"Герои" are present.
+            has_party_nav = any(("группа" in b) or ("герои" in b) for b in low_buttons)
+            if not has_party_nav:
+                return
             # IMPORTANT: click only the dedicated "/party -> Подземелья" button.
             # Using a broad substring ("подзем") misfires on other menus like
             # Pierre's key crafting list ("Темнейшее подземелье", etc.).
