@@ -434,45 +434,40 @@ async def _use_preferred_dungeon_buffs(client: TelegramClient, *, reason: str, f
                 return True
             backpack = snap.get("backpack", []) or []
 
-    # Buff groups have long durations, so reapply by group cooldown instead of
-    # spamming all consumables on every dungeon prompt.
+    # Top-up buffs to target window, accounting for already active remaining time.
     spec = (
-        ("wealth", ["фрукт богатства"], 90 * 60),
-        ("vitality", ["огромный карась"], 20 * 60),
-        ("combat_xp", ["огромная форель"], 20 * 60),
-        ("regen", ["огромный лосось"], 20 * 60),
-        ("armor", ["титановой кожи", "железной кожи"], 60 * 60),
-        ("power", ["силы дракона", "силы медведя", "силы волка"], 60 * 60),
+        # group, patterns, cooldown, target_minutes, per_item_minutes
+        ("wealth", ["фрукт богатства"], 90 * 60, 120, 120),
+        ("vitality", ["огромный карась"], 20 * 60, 180, 30),
+        ("combat_xp", ["огромная форель"], 20 * 60, 180, 30),
+        ("regen", ["огромный лосось"], 20 * 60, 180, 30),
+        ("armor", ["титановой кожи", "железной кожи"], 60 * 60, 180, 90),
+        ("power", ["силы дракона", "силы медведя", "силы волка"], 60 * 60, 180, 90),
     )
 
-    plan: list[tuple[str, str, list[str], int]] = []
-    for group, patterns, group_cd_sec in spec:
-        if _effect_group_is_active(effects_state["active_norm"], group):
+    plan: list[tuple[str, str, list[str], int, int]] = []
+    for group, patterns, group_cd_sec, target_min, per_item_min in spec:
+        rem_min = _effect_group_remaining_min(effects_state["active_norm"], group)
+        need_min = max(0, int(target_min) - int(rem_min))
+        qty_needed = (need_min + int(per_item_min) - 1) // int(per_item_min)
+        if qty_needed <= 0:
             continue
         nxt = float(get_kv(f"dungeon_buff_next_ts:{group}", "0") or 0.0)
         if (not force) and now < nxt:
             continue
         cmd = _find_backpack_item_cmd(backpack, patterns)
         if cmd:
-            plan.append((group, cmd, patterns, group_cd_sec))
+            plan.append((group, cmd, patterns, group_cd_sec, int(qty_needed)))
 
     if not plan:
         return False
 
     used = 0
-    for group, item_cmd, patterns, group_cd_sec in plan:
+    for group, item_cmd, patterns, group_cd_sec, qty_needed in plan:
         await _human_sleep(kind="inventory", lo=0.9, hi=1.9, note=f"buff {item_cmd}")
         # Fast path: use quantity command directly to avoid opening each card.
         # Example command accepted by the game: "Использовать 24 2".
-        qty_by_group = {
-            "wealth": 1,
-            "vitality": 2,
-            "combat_xp": 2,
-            "regen": 2,
-            "armor": 2,
-            "power": 2,
-        }
-        qty = int(qty_by_group.get(group, 1))
+        qty = max(1, int(qty_needed))
         m_id = re.search(r"/i_(\d+)\b", item_cmd or "")
         used_fast = False
         if m_id:
@@ -620,6 +615,28 @@ def _effect_group_is_active(active_norm: list[str], group: str) -> bool:
     if not markers:
         return False
     return any(any(m in line for m in markers) for line in (active_norm or []))
+
+
+def _parse_effect_line_remaining_min(norm_line: str) -> int:
+    total = 0
+    h = re.search(r"(\d+)\s*ч", norm_line or "")
+    if h:
+        total += int(h.group(1)) * 60
+    m = re.search(r"(\d+)\s*мин", norm_line or "")
+    if m:
+        total += int(m.group(1))
+    return total
+
+
+def _effect_group_remaining_min(active_norm: list[str], group: str) -> int:
+    markers = _EFFECT_GROUP_MARKERS.get(group) or ()
+    if not markers:
+        return 0
+    best = 0
+    for line in (active_norm or []):
+        if any(mark in line for mark in markers):
+            best = max(best, _parse_effect_line_remaining_min(line))
+    return best
 
 
 async def _try_use_cleansing_potion(client: TelegramClient, backpack: list[tuple[str, str]]) -> bool:
