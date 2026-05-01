@@ -959,6 +959,10 @@ def mod_dungeon_altar_1000_touch_enabled() -> bool:
     # Separate switch for "Алтарь Тысячелапого"
     return _kv_bool("mod_dungeon_altar_1000_touch", False)
 
+def mod_dungeon_altar_mara_touch_enabled() -> bool:
+    # Separate switch for "Алтарь Мары"
+    return _kv_bool("mod_dungeon_altar_mara_touch", False)
+
 def mod_dungeon_rubble_break_enabled() -> bool:
     # Break "Каменный завал" automatically ("Разобрать")
     return _kv_bool("mod_dungeon_rubble_break", True)
@@ -3738,8 +3742,9 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
         low_txt = _normalize_ru(txt_full)
         pos_touch = _find_pos_by_substring(msg, "прикосн")
         pos_forward_local = _find_pos_by_substring(msg, "впер")
-        is_altar_room = (("алтар" in low_txt) or ("бастет" in low_txt) or ("инари" in low_txt) or ("тануки" in low_txt))
+        is_altar_room = (("алтар" in low_txt) or ("бастет" in low_txt) or ("инари" in low_txt) or ("тануки" in low_txt) or ("мары" in low_txt) or ("мара" in low_txt))
         is_altar_1000 = ("тысячелап" in low_txt)
+        is_altar_mara = (("мары" in low_txt) or ("мара" in low_txt))
         altar_race = None
         if ("инари" in low_txt) or ("наве" in low_txt) or ("для лис" in low_txt):
             altar_race = "fox"
@@ -3770,7 +3775,11 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
         if is_altar_room and (pos_touch is not None):
             race_known = my_race in ("fox", "raccoon", "lynx")
             race_match = bool(race_known and altar_race and (my_race == altar_race))
-            legacy_switch_touch = (mod_dungeon_altar_1000_touch_enabled() if is_altar_1000 else mod_dungeon_altar_touch_enabled())
+            legacy_switch_touch = (
+                mod_dungeon_altar_1000_touch_enabled()
+                if is_altar_1000
+                else (mod_dungeon_altar_mara_touch_enabled() if is_altar_mara else mod_dungeon_altar_touch_enabled())
+            )
             # Backward-compatible fallback:
             # if race is unknown or altar race can't be inferred, use legacy switches.
             allow_touch = race_match or (not race_known) or (not altar_race and legacy_switch_touch)
@@ -3799,7 +3808,7 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
                 if wait_until <= now_ts:
                     wait_until = now_ts + wait_seconds
                     _kv_set(wait_key, f"{wait_until:.3f}")
-                    altar_name = "Тысячелапого" if is_altar_1000 else (altar_race or "чужой")
+                    altar_name = "Тысячелапого" if is_altar_1000 else ("Мары" if is_altar_mara else (altar_race or "чужой"))
                     log.info("🐾 Данж: алтарь %s не по расе (%s) → жду %.0fs перед 'Вперёд'", altar_name, my_race or "unknown", wait_seconds)
 
                 left = max(0.0, wait_until - now_ts)
@@ -3821,6 +3830,8 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
 
                 if is_altar_1000:
                     log.info("🐾 Данж: алтарь Тысячелапого не по расе/логике касания")
+                elif is_altar_mara:
+                    log.info("🐾 Данж: алтарь Мары выключен, касание пропущено")
                 else:
                     log.info("🐾 Данж: алтарь найден, касание пропущено")
                 return
@@ -5903,6 +5914,7 @@ async def run():
             ("dungeon","mod_dungeon","🕸 dungeon"),
             ("altar","mod_dungeon_altar_touch","🐾 altar_touch"),
             ("altar1000","mod_dungeon_altar_1000_touch","🕷 altar1000_touch"),
+            ("mara","mod_dungeon_altar_mara_touch","🌙 altar_mara_touch"),
             ("boarded","mod_dungeon_boarded_chop","🪓 boarded_chop"),
             ("rubble","mod_dungeon_rubble_break","⛏️ rubble_break"),
             ("grave","mod_dungeon_grave_open","⚰️ grave_open"),
@@ -5929,6 +5941,7 @@ async def run():
                     f"/dungeon on|off  (сейчас: {'on' if mod_dungeon_enabled() else 'off'})",
                     f"/altar on|off    (сейчас: {'on' if mod_dungeon_altar_touch_enabled() else 'off'})",
                     f"/altar1000 on|off (сейчас: {'on' if mod_dungeon_altar_1000_touch_enabled() else 'off'})",
+                    f"/mara on|off     (сейчас: {'on' if mod_dungeon_altar_mara_touch_enabled() else 'off'})",
                     f"/boarded on|off  (сейчас: {'on' if mod_dungeon_boarded_chop_enabled() else 'off'})",
                     f"/rubble on|off   (сейчас: {'on' if mod_dungeon_rubble_break_enabled() else 'off'})",
                     f"/grave on|off    (сейчас: {'on' if mod_dungeon_grave_open_enabled() else 'off'})",
