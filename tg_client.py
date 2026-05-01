@@ -3536,6 +3536,7 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
     if nxt_stage and nxt_target and state.buttons and state.stage == "other":
         btn_labels = [((b.btn_text or b.name or "").strip()) for b in state.buttons]
         low_buttons = [_normalize_ru(t) for t in btn_labels]
+        low_txt_chain = _normalize_ru(txt_full)
         if nxt_stage == "open_party":
             # IMPORTANT: click only the dedicated "/party -> Подземелья" button.
             # Using a broad substring ("подзем") misfires on other menus like
@@ -3549,6 +3550,11 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
                     _kv_set("dungeon_next_key_stage", "choose_dungeon")
                 return
         elif nxt_stage == "choose_dungeon":
+            # Run dungeon choice only on the actual party-dungeon chooser screen.
+            # Pierre's key crafting menu has similar dungeon names, but is not a run launch UI.
+            if not (("приключени" in low_txt_chain) and ("для групп" in low_txt_chain)):
+                _kv_set("dungeon_next_key_stage", "open_party")
+                return
             want = "темнейш" if nxt_target == "night" else "катакомб"
             pos = None
             # Prefer exact tier match when key has known level (I..V).
