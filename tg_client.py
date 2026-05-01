@@ -437,6 +437,8 @@ async def _use_preferred_dungeon_buffs(client: TelegramClient, *, reason: str, f
     # Top-up buffs to target window, accounting for already active remaining time.
     spec = (
         # group, patterns, cooldown, target_minutes, per_item_minutes
+        # Wealth can be shown without explicit remaining timer in /character,
+        # so for this group we rely on "is active" marker + cooldown.
         ("wealth", ["фрукт богатства"], 90 * 60, 120, 120),
         ("vitality", ["огромный карась"], 20 * 60, 180, 30),
         ("combat_xp", ["огромная форель"], 20 * 60, 180, 30),
@@ -447,6 +449,8 @@ async def _use_preferred_dungeon_buffs(client: TelegramClient, *, reason: str, f
 
     plan: list[tuple[str, str, list[str], int, int]] = []
     for group, patterns, group_cd_sec, target_min, per_item_min in spec:
+        if group == "wealth" and _effect_group_is_active(effects_state["active_norm"], "wealth"):
+            continue
         rem_min = _effect_group_remaining_min(effects_state["active_norm"], group)
         need_min = max(0, int(target_min) - int(rem_min))
         qty_needed = (need_min + int(per_item_min) - 1) // int(per_item_min)
@@ -574,7 +578,7 @@ _NEGATIVE_EFFECT_MARKERS = (
 )
 
 _EFFECT_GROUP_MARKERS = {
-    "wealth": ("бонус 🌙", "бонус луны", "лунные лепестки"),
+    "wealth": ("бонус 🌙", "бонус луны", "лунные лепестки", "🍏🌙", "🌙: +50"),
     "vitality": ("живучесть", "🐋"),
     "combat_xp": ("боевой ⚜️", "боевой опыт", "🦈"),
     "regen": ("регенерация", "🐬"),
