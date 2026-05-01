@@ -2700,6 +2700,14 @@ async def _handle_post_battle_heal(client: TelegramClient, msg):
     """
     base_msg_id = getattr(msg, "id", None)
     text = msg.message or ""
+    # Pre-scout equip: on victory screens with "Осмотреться" we prefer to switch
+    # to E2 before starting potion logic. This helps party/dungeon flows where
+    # leader advances quickly and we must be ready for immediate scouting.
+    try:
+        if _find_pos_by_substring(msg, "осмотреться") is not None:
+            await _send_set_command(client, 2)  # E2: torch/navigation set
+    except Exception:
+        pass
 
     def _party_heal_target_pct() -> float:
         """Party-specific heal target configured via /partyhp (10..100%)."""
