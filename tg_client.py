@@ -402,6 +402,13 @@ async def _use_preferred_dungeon_buffs(client: TelegramClient, *, reason: str, f
       power: dragon > bear > wolf
     """
     now = time.time()
+    # Buff consumables are not usable in active combat screens.
+    # Also avoid opening inventory while forest/battle loops are in control.
+    ui_stage = (get_kv("last_stage", "") or "").strip().lower()
+    if ui_stage in ("battle", "forest"):
+        log.info("🧪 buff-use skipped (%s): ui_stage=%s", reason, ui_stage or "?")
+        return False
+
     if not force:
         last = float(get_kv("dungeon_buffs_last_ts", "0") or 0.0)
         if (now - last) < 25.0:
@@ -427,44 +434,63 @@ async def _use_preferred_dungeon_buffs(client: TelegramClient, *, reason: str, f
                 return True
             backpack = snap.get("backpack", []) or []
 
-    # Buff groups have long durations, so reapply by group cooldown instead of
-    # spamming all consumables on every dungeon prompt.
+    # Top-up buffs to target window, accounting for already active remaining time.
     spec = (
-        ("wealth", ["фрукт богатства"], 90 * 60),
-        ("vitality", ["огромный карась"], 20 * 60),
-        ("combat_xp", ["огромная форель"], 20 * 60),
-        ("regen", ["огромный лосось"], 20 * 60),
-        ("armor", ["титановой кожи", "железной кожи"], 60 * 60),
-        ("power", ["силы дракона", "силы медведя", "силы волка"], 60 * 60),
+        # group, patterns, cooldown, target_minutes, per_item_minutes
+        # Wealth can be shown without explicit remaining timer in /character,
+        # so for this group we rely on "is active" marker + cooldown.
+        ("wealth", ["фрукт богатства"], 90 * 60, 120, 120),
+        ("vitality", ["огромный карась"], 20 * 60, 180, 30),
+        ("combat_xp", ["огромная форель"], 20 * 60, 180, 30),
+        ("regen", ["огромный лосось"], 20 * 60, 180, 30),
+        ("armor", ["титановой кожи", "железной кожи"], 60 * 60, 180, 90),
+        ("power", ["силы дракона", "силы медведя", "силы волка"], 60 * 60, 180, 90),
     )
 
-    plan: list[tuple[str, str, list[str], int]] = []
-    for group, patterns, group_cd_sec in spec:
-        if _effect_group_is_active(effects_state["active_norm"], group):
+    plan: list[tuple[str, str, list[str], int, int]] = []
+    for group, patterns, group_cd_sec, target_min, per_item_min in spec:
+        if group == "wealth" and _effect_group_is_active(effects_state["active_norm"], "wealth"):
+            continue
+        rem_min = _effect_group_remaining_min(effects_state["active_norm"], group)
+        need_min = max(0, int(target_min) - int(rem_min))
+        qty_needed = (need_min + int(per_item_min) - 1) // int(per_item_min)
+        if qty_needed <= 0:
             continue
         nxt = float(get_kv(f"dungeon_buff_next_ts:{group}", "0") or 0.0)
         if (not force) and now < nxt:
             continue
         cmd = _find_backpack_item_cmd(backpack, patterns)
         if cmd:
-            plan.append((group, cmd, patterns, group_cd_sec))
+            plan.append((group, cmd, patterns, group_cd_sec, int(qty_needed)))
 
     if not plan:
         return False
 
     used = 0
-    for group, item_cmd, patterns, group_cd_sec in plan:
+    for group, item_cmd, patterns, group_cd_sec, qty_needed in plan:
         await _human_sleep(kind="inventory", lo=0.9, hi=1.9, note=f"buff {item_cmd}")
-        await client.send_message(CFG.game_chat, item_cmd)
-        # В текущем UI карточку предмета часто нужно подтверждать кликом "Использовать"
-        # (не только для фрукта богатства). Пытаемся нажать кнопку для всех бафов.
-        try:
-            await asyncio.sleep(0.9)
-            m = await _get_recent_bot_message_with_buttons(client, CFG.game_chat, limit=10)
-            if m is not None:
-                await click_button_contains(client, m, ["использовать", "▶️ использовать", "▶ использовать"])
-        except Exception as e:
-            log.warning("🧪 buff-use click failed for %s: %s", item_cmd, e)
+        # Fast path: use quantity command directly to avoid opening each card.
+        # Example command accepted by the game: "Использовать 24 2".
+        qty = max(1, int(qty_needed))
+        m_id = re.search(r"/i_(\d+)\b", item_cmd or "")
+        used_fast = False
+        if m_id:
+            fast_cmd = f"Использовать {m_id.group(1)} {qty}"
+            try:
+                await client.send_message(CFG.game_chat, fast_cmd)
+                used_fast = True
+            except Exception as e:
+                log.warning("🧪 fast buff-use failed for %s via %r: %s", item_cmd, fast_cmd, e)
+        if not used_fast:
+            await client.send_message(CFG.game_chat, item_cmd)
+            # Fallback for UIs that require opening card + clicking "Использовать".
+            try:
+                await asyncio.sleep(0.9)
+                m = await _get_recent_bot_message_with_buttons(client, CFG.game_chat, limit=10)
+                if m is not None:
+                    await click_button_contains(client, m, ["использовать", "▶️ использовать", "▶ использовать"])
+            except Exception as e:
+                log.warning("🧪 buff-use click failed for %s: %s", item_cmd, e)
         used += 1
         _kv_set(f"dungeon_buff_next_ts:{group}", f"{(now + group_cd_sec):.3f}")
 
@@ -552,7 +578,7 @@ _NEGATIVE_EFFECT_MARKERS = (
 )
 
 _EFFECT_GROUP_MARKERS = {
-    "wealth": ("бонус 🌙", "бонус луны", "лунные лепестки"),
+    "wealth": ("бонус 🌙", "бонус луны", "лунные лепестки", "🍏🌙", "🌙: +50"),
     "vitality": ("живучесть", "🐋"),
     "combat_xp": ("боевой ⚜️", "боевой опыт", "🦈"),
     "regen": ("регенерация", "🐬"),
@@ -593,6 +619,28 @@ def _effect_group_is_active(active_norm: list[str], group: str) -> bool:
     if not markers:
         return False
     return any(any(m in line for m in markers) for line in (active_norm or []))
+
+
+def _parse_effect_line_remaining_min(norm_line: str) -> int:
+    total = 0
+    h = re.search(r"(\d+)\s*ч", norm_line or "")
+    if h:
+        total += int(h.group(1)) * 60
+    m = re.search(r"(\d+)\s*мин", norm_line or "")
+    if m:
+        total += int(m.group(1))
+    return total
+
+
+def _effect_group_remaining_min(active_norm: list[str], group: str) -> int:
+    markers = _EFFECT_GROUP_MARKERS.get(group) or ()
+    if not markers:
+        return 0
+    best = 0
+    for line in (active_norm or []):
+        if any(mark in line for mark in markers):
+            best = max(best, _parse_effect_line_remaining_min(line))
+    return best
 
 
 async def _try_use_cleansing_potion(client: TelegramClient, backpack: list[tuple[str, str]]) -> bool:
@@ -2548,6 +2596,8 @@ async def _handle_party_event(client: TelegramClient, msg: Message, state) -> bo
     has_decline = any("отказ" in (t or "").lower() for t in btns)
 
     if is_invite or (has_accept and has_decline):
+        # Always arm one fresh buff attempt for this invite event.
+        set_kv("party_buffs_applied", "0")
         # Snapshot modes only once per invite chain.
         if get_kv("party_snapshot_done", "0") != "1":
             _party_snapshot_modes()
@@ -2558,6 +2608,23 @@ async def _handle_party_event(client: TelegramClient, msg: Message, state) -> bo
         set_kv("fish_stop_cast", "1")
         set_kv("fish_stop_cast_since", str(time.time()))
         set_kv("pending_mode", "party")
+        # If fishing UI is still active, cancel it immediately so inventory/party
+        # actions won't time out behind "Подсечь/Отмена" screen.
+        try:
+            recent = await client.get_messages(CFG.game_chat, limit=12)
+            fish_msg = None
+            for cand in recent:
+                if not getattr(cand, "buttons", None):
+                    continue
+                fish_labels = " ".join(_normalize_ru(x) for x in _button_labels(cand))
+                if ("подсеч" in fish_labels) and ("отмен" in fish_labels):
+                    fish_msg = cand
+                    break
+            if fish_msg is not None:
+                await _human_sleep(kind="click", lo=0.25, hi=0.75, note="party invite: cancel fishing first")
+                await click_button_contains(client, fish_msg, ["Отмена", "✖️Отмена", "✖ Отмена"])
+        except Exception as e:
+            log.debug("party invite pre-cancel fishing skipped: %s", e)
 
         # Click accept if button exists.
         if has_accept:
@@ -2567,9 +2634,11 @@ async def _handle_party_event(client: TelegramClient, msg: Message, state) -> bo
             set_party_active(True)
             set_kv("party_last_event", "invite_accept")
             try:
-                await _use_preferred_dungeon_buffs(client, reason="party_invite_accept", force=True)
+                applied = await _use_preferred_dungeon_buffs(client, reason="party_invite_accept", force=True)
+                set_kv("party_buffs_applied", "1" if applied else "0")
             except Exception as e:
                 log.warning("🤝 PARTY: не удалось применить стартовые бафы: %s", e)
+                set_kv("party_buffs_applied", "0")
             return True
 
         # If we cannot click (no buttons), just mark active and wait for join msg.
@@ -3086,6 +3155,15 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
     pending_mode = (get_kv("pending_mode", "") or "").strip().lower()
     stop_cast_active = ((get_kv("fish_stop_cast", "0") == "1") and pending_mode in ("forest", "pet"))
     if is_fishing_or_rodflow and not mod_fishing_enabled() and not stop_cast_active:
+        # If stale fishing screen is still visible after /fish off (e.g. party invite),
+        # close it proactively by pressing cancel.
+        pos_cancel = _find_pos_by_substring(msg, "отмен")
+        if pos_cancel is not None:
+            d = random.uniform(0.2, 0.8)
+            log.info("🎛 Рыбалка выключена (/fish off) — закрываю рыбалку кнопкой 'Отмена' через %.2fs.", d)
+            await asyncio.sleep(d)
+            await click_button(client, msg, pos=pos_cancel)
+            return
         log.info("🎛 Рыбалка выключена (/fish off) — игнорирую рыболовные действия.")
         return
 
@@ -3126,19 +3204,10 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
     party_passive_in_dungeon = is_party_active() and dungeon_runtime and (not is_party_driver())
     can_drive_dungeon = (not party_passive_in_dungeon)
 
-    # Immediate key-acquire trigger (e.g. "получает 🗝Ключ шипов III ..."):
-    # prepare chain without waiting for explicit post-dungeon completion branch.
-    key_detected = _detect_dungeon_key_target(txt_full)
-    if key_detected and (get_kv("dungeon_next_key_stage", "") or "").strip() == "":
-        key_target_now, key_tier_now = key_detected
-        _kv_set("dungeon_next_key_target", key_target_now)
-        _kv_set("dungeon_next_key_tier", key_tier_now or "")
-        _kv_set("dungeon_next_key_stage", "open_party")
-        log.info("🗝️ Данж-цепочка: обнаружен ключ (%s/%s) → готовлю /party", key_target_now, key_tier_now or "?")
-        # Ask /party once if we're not already on party screen.
-        if "группа" not in low_full and "/p_" not in txt_full:
-            await _human_sleep(kind="mode_switch", lo=0.7, hi=1.7, note="key acquired -> /party")
-            await client.send_message(CFG.game_chat, "/party")
+    # NOTE: auto-relaunch chain must start ONLY from explicit post-dungeon completion
+    # flow (after pressing "Завершить" -> inventory check). Do not arm from generic
+    # "key acquired" messages, otherwise manual key crafting/buying can trigger
+    # unintended /party navigation.
 
     # Post-dungeon key check flow:
     # 1) after pressing "Завершить", request /inventory
@@ -3530,11 +3599,24 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
     nxt_stage = (get_kv("dungeon_next_key_stage", "") or "").strip()
     nxt_target = (get_kv("dungeon_next_key_target", "") or "").strip()
     nxt_tier = (get_kv("dungeon_next_key_tier", "") or "").strip().upper()
-    if nxt_stage and nxt_target and state.buttons:
+    # Safety gate: key-chain navigation must run only on neutral/party-like screens.
+    # Some forest menus (e.g. Tower) can also contain a "Подземелья" button, and
+    # without this guard we may misclick into dungeons unintentionally.
+    if nxt_stage and nxt_target and state.buttons and state.stage == "other":
         btn_labels = [((b.btn_text or b.name or "").strip()) for b in state.buttons]
         low_buttons = [_normalize_ru(t) for t in btn_labels]
+        low_txt_chain = _normalize_ru(txt_full)
         if nxt_stage == "open_party":
-            pos = _find_pos_by_substring(msg, "подзем")
+            # Tower screen can also have a "Подземелья" button.
+            # Only allow this step on party-like menu where companion buttons
+            # such as "Группа"/"Герои" are present.
+            has_party_nav = any(("группа" in b) or ("герои" in b) for b in low_buttons)
+            if not has_party_nav:
+                return
+            # IMPORTANT: click only the dedicated "/party -> Подземелья" button.
+            # Using a broad substring ("подзем") misfires on other menus like
+            # Pierre's key crafting list ("Темнейшее подземелье", etc.).
+            pos = _find_pos_by_exact_label(msg, ["Подземелья"])
             if pos is not None:
                 d = human_delay_combat("battle")
                 log.info("🗝️ Данж-цепочка: в /party жму 'Подземелья' через %.2fs", d)
@@ -3543,6 +3625,11 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
                     _kv_set("dungeon_next_key_stage", "choose_dungeon")
                 return
         elif nxt_stage == "choose_dungeon":
+            # Run dungeon choice only on the actual party-dungeon chooser screen.
+            # Pierre's key crafting menu has similar dungeon names, but is not a run launch UI.
+            if not (("приключени" in low_txt_chain) and ("для групп" in low_txt_chain)):
+                _kv_set("dungeon_next_key_stage", "open_party")
+                return
             want = "темнейш" if nxt_target == "night" else "катакомб"
             pos = None
             # Prefer exact tier match when key has known level (I..V).
