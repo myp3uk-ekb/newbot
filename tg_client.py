@@ -3530,7 +3530,10 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
     nxt_stage = (get_kv("dungeon_next_key_stage", "") or "").strip()
     nxt_target = (get_kv("dungeon_next_key_target", "") or "").strip()
     nxt_tier = (get_kv("dungeon_next_key_tier", "") or "").strip().upper()
-    if nxt_stage and nxt_target and state.buttons:
+    # Safety gate: key-chain navigation must run only on neutral/party-like screens.
+    # Some forest menus (e.g. Tower) can also contain a "Подземелья" button, and
+    # without this guard we may misclick into dungeons unintentionally.
+    if nxt_stage and nxt_target and state.buttons and state.stage == "other":
         btn_labels = [((b.btn_text or b.name or "").strip()) for b in state.buttons]
         low_buttons = [_normalize_ru(t) for t in btn_labels]
         if nxt_stage == "open_party":
