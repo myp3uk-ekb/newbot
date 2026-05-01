@@ -3202,6 +3202,11 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
     go_hint_active = (now_ts < go_until_ts)
     party_passive_in_dungeon = is_party_active() and dungeon_runtime and (not is_party_driver())
     can_drive_dungeon = (not party_passive_in_dungeon)
+    # Passive party role (non-driver) can still perform narrow "scout prep":
+    # - equip E2 and press "Осмотреться"
+    # - equip E1 when attack screen appears (without clicking attack)
+    # but must NOT choose rooms or move forward.
+    passive_scout_mode = party_passive_in_dungeon
 
     # NOTE: auto-relaunch chain must start ONLY from explicit post-dungeon completion
     # flow (after pressing "Завершить" -> inventory check). Do not arm from generic
@@ -3371,7 +3376,10 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
         except Exception:
             pass
         d = human_delay_combat("battle")
-        log.info(f"🔦 Данж: жму 'Осмотреться' через {d:.2f}s")
+        if passive_scout_mode:
+            log.info(f"🔦🤝 Данж(passive): переключаю на E2 и жму 'Осмотреться' через {d:.2f}s")
+        else:
+            log.info(f"🔦 Данж: жму 'Осмотреться' через {d:.2f}s")
         await asyncio.sleep(d)
         await click_button(client, msg, pos=pos_inspect)
         return
@@ -3399,6 +3407,13 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
         await asyncio.sleep(d)
         if not await _click_action_button_resilient(client, msg, labels=["Напасть", "В бой"], timeout_sec=4.0):
             log.warning("⚔️ Не удалось нажать 'Напасть' после переключения E1")
+        return
+    if pos_attack is not None and passive_scout_mode:
+        try:
+            await _send_set_command(client, 1)  # E1: combat set
+        except Exception:
+            pass
+        log.info("⚔️🤝 Данж(passive): найдено 'Напасть/В бой' — переключился на E1 без нажатия")
         return
 
     # Lockpick flow in dungeon: switch to E3 and click lock.
