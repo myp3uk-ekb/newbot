@@ -3530,11 +3530,24 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
     nxt_stage = (get_kv("dungeon_next_key_stage", "") or "").strip()
     nxt_target = (get_kv("dungeon_next_key_target", "") or "").strip()
     nxt_tier = (get_kv("dungeon_next_key_tier", "") or "").strip().upper()
-    if nxt_stage and nxt_target and state.buttons:
+    # Safety gate: key-chain navigation must run only on neutral/party-like screens.
+    # Some forest menus (e.g. Tower) can also contain a "Подземелья" button, and
+    # without this guard we may misclick into dungeons unintentionally.
+    if nxt_stage and nxt_target and state.buttons and state.stage == "other":
         btn_labels = [((b.btn_text or b.name or "").strip()) for b in state.buttons]
         low_buttons = [_normalize_ru(t) for t in btn_labels]
+        low_txt_chain = _normalize_ru(txt_full)
         if nxt_stage == "open_party":
-            pos = _find_pos_by_substring(msg, "подзем")
+            # Tower screen can also have a "Подземелья" button.
+            # Only allow this step on party-like menu where companion buttons
+            # such as "Группа"/"Герои" are present.
+            has_party_nav = any(("группа" in b) or ("герои" in b) for b in low_buttons)
+            if not has_party_nav:
+                return
+            # IMPORTANT: click only the dedicated "/party -> Подземелья" button.
+            # Using a broad substring ("подзем") misfires on other menus like
+            # Pierre's key crafting list ("Темнейшее подземелье", etc.).
+            pos = _find_pos_by_exact_label(msg, ["Подземелья"])
             if pos is not None:
                 d = human_delay_combat("battle")
                 log.info("🗝️ Данж-цепочка: в /party жму 'Подземелья' через %.2fs", d)
@@ -3543,6 +3556,11 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
                     _kv_set("dungeon_next_key_stage", "choose_dungeon")
                 return
         elif nxt_stage == "choose_dungeon":
+            # Run dungeon choice only on the actual party-dungeon chooser screen.
+            # Pierre's key crafting menu has similar dungeon names, but is not a run launch UI.
+            if not (("приключени" in low_txt_chain) and ("для групп" in low_txt_chain)):
+                _kv_set("dungeon_next_key_stage", "open_party")
+                return
             want = "темнейш" if nxt_target == "night" else "катакомб"
             pos = None
             # Prefer exact tier match when key has known level (I..V).
