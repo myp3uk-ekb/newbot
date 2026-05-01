@@ -2635,9 +2635,12 @@ async def _handle_party_event(client: TelegramClient, msg: Message, state) -> bo
             _party_enter_modes("invite_accept")
             set_party_active(True)
             set_kv("party_last_event", "invite_accept")
+            log.info("🤝 PARTY: invite accepted, trying pre-dungeon buffs (reason=party_invite_accept)")
             try:
                 applied = await _use_preferred_dungeon_buffs(client, reason="party_invite_accept", force=True)
                 set_kv("party_buffs_applied", "1" if applied else "0")
+                if not applied:
+                    log.info("🤝 PARTY: invite_accept buffs not applied now (will retry on join/party screen)")
             except Exception as e:
                 log.warning("🤝 PARTY: не удалось применить стартовые бафы: %s", e)
                 set_kv("party_buffs_applied", "0")
@@ -2658,14 +2661,19 @@ async def _handle_party_event(client: TelegramClient, msg: Message, state) -> bo
         _party_enter_modes("joined")
         set_party_active(True)
         set_kv("party_last_event", "joined" if is_join else "created")
+        set_kv("party_buffs_applied", "0")
+        log.info("🤝 PARTY: join/create detected, trying pre-dungeon buffs (reason=%s)",
+                 "party_joined" if is_join else "party_created")
         if get_kv("party_buffs_applied", "0") != "1":
             try:
-                await _use_preferred_dungeon_buffs(
+                applied = await _use_preferred_dungeon_buffs(
                     client,
                     reason="party_joined" if is_join else "party_created",
                     force=True,
                 )
-                set_kv("party_buffs_applied", "1")
+                set_kv("party_buffs_applied", "1" if applied else "0")
+                if not applied:
+                    log.info("🤝 PARTY: join/create buffs not applied yet (waiting for next party signal)")
             except Exception as e:
                 log.warning("🤝 PARTY: не удалось применить стартовые бафы: %s", e)
         log.info("🤝 PARTY: %s", "вступили в группу" if is_join else "группа создана")
