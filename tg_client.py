@@ -4694,19 +4694,11 @@ async def _pet_flow_run(client: TelegramClient) -> bool:
         # Tell the click humanizer we're in the pet flow.
         _kv_set("human_ctx", "pet")
 
-        # If party is active, stop PET and defer until user enables it again.
+        # Party has priority: while party is active we defer pet flow,
+        # but keep /pet module enabled so it can resume automatically later.
         if is_party_active():
-            log.warning("🐾 PET: обнаружена активная пати — выключаю /pet и жду ручного включения")
+            log.warning("🐾 PET: обнаружена активная пати → откладываю pet до завершения пати")
             _kv_set("pet_deferred", "1")
-            _kv_set("mod_pet", "0")
-            return False
-
-        # Party has priority: if we are in a party right now,
-        # don't do pet clicks (can mess up group UI). Defer until manual /pet on.
-        if is_party_active():
-            log.warning("🐾 PET: обнаружена активная пати → отключаю pet и откладываю")
-            _kv_set("pet_deferred", "1")
-            _kv_set("mod_pet", "0")
             return False
         chat = CFG.game_chat
         log.info("🐾 PET: стартую процедуру 'погладить всех'")
@@ -4888,8 +4880,8 @@ async def _pet_flow_run(client: TelegramClient) -> bool:
         for fcmd in terr_cmds:
             # Если в этот момент обнаружилась пати — прекращаю петов и жду ручного включения.
             if kv.get("party_active", "0") == "1":
-                log.warning("🐾 PET: обнаружена пати → выключаю pet и выхожу (жду /pet on).")
-                kv.set("mod_pet", "0")
+                log.warning("🐾 PET: обнаружена пати → откладываю pet до завершения пати и выхожу.")
+                kv.set("pet_deferred", "1")
                 kv.set("human_ctx", "")
                 return
 
@@ -4980,8 +4972,8 @@ async def _pet_flow_run(client: TelegramClient) -> bool:
             # 1) Проходим по кнопкам-питомцам (если они есть)
             for (r, c, t) in pet_btns:
                 if kv.get("party_active", "0") == "1":
-                    log.warning("🐾 PET: пати появилась во время процедуры → выключаю pet и выхожу.")
-                    kv.set("mod_pet", "0")
+                    log.warning("🐾 PET: пати появилась во время процедуры → откладываю pet и выхожу.")
+                    kv.set("pet_deferred", "1")
                     kv.set("human_ctx", "")
                     return
 
@@ -5040,8 +5032,8 @@ async def _pet_flow_run(client: TelegramClient) -> bool:
             if not pet_btns and pet_cmds:
                 for pcmd in pet_cmds:
                     if kv.get("party_active", "0") == "1":
-                        log.warning("🐾 PET: пати появилась во время процедуры → выключаю pet и выхожу.")
-                        kv.set("mod_pet", "0")
+                        log.warning("🐾 PET: пати появилась во время процедуры → откладываю pet и выхожу.")
+                        kv.set("pet_deferred", "1")
                         kv.set("human_ctx", "")
                         return
 
