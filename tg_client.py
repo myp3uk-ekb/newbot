@@ -2074,14 +2074,16 @@ def human_delay_weighted(kind: str) -> float:
     return random.uniform(1.0, 2.0)
 
 async def _handle_fishing(client: TelegramClient, msg, state):
-    # Guard: act only when fishing is the active mode.
-    if get_kv("active_mode", "forest") != "fishing":
-        return
     # When MODE scheduled a return away from fishing, we still allow the fishing
     # handler to finish the current bite (strike) and then leave.
     pending_mode = get_kv("pending_mode", "")
     stop_kind = (get_kv("fish_stop_cast_kind", "") or "").strip().lower()
     stop_cast = (get_kv("fish_stop_cast", "0") == "1" and pending_mode in ("forest","pet"))
+
+    # Guard: normally act only in fishing mode, but keep processing while stop_cast
+    # is active so we can finish a bite before switching to another mode.
+    if get_kv("active_mode", "forest") != "fishing" and not stop_cast:
+        return
 
     # If fishing is disabled, we still may need to "finish and leave" when stop_cast is set.
     if not mod_fishing_enabled() and not stop_cast:
