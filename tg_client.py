@@ -3230,7 +3230,16 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
     # 2) if inventory dump shows known dungeon keys -> open /party
     if (get_kv("dungeon_postcheck_pending", "0") == "1"):
         low_inv = _normalize_ru(txt_full or "")
-        is_inventory_dump = (" /i_h " in txt_full or "/i_h " in txt_full) and ("💚" in (txt_full or ""))
+        # Inventory layouts differ between UI revisions/chats. Some dumps omit
+        # the HP line (💚), so strict "... and 💚" gating can block post-dungeon
+        # key checks forever. Treat any message with several /i_* item rows as an
+        # inventory snapshot as well.
+        item_rows = len(re.findall(r"(^|\n)\s*/i_[a-z0-9]+\s+", txt_full or "", flags=re.IGNORECASE))
+        is_inventory_dump = (
+            ((" /i_h " in (txt_full or "")) or ("/i_h " in (txt_full or "")))
+            or (item_rows >= 3)
+            or (("инвентар" in low_inv) and ("/i_" in (txt_full or "")))
+        )
         if is_inventory_dump:
             detected = _detect_dungeon_key_target(txt_full)
             if detected:
