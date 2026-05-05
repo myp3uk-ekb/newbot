@@ -3210,9 +3210,10 @@ async def handle_game_event(client: TelegramClient, event, kind: str):
     dungeon_runtime = mod_dungeon_enabled() and (dungeon_context_now or now_ts < run_until)
     go_until_ts = float(get_kv("party_go_until_ts", "0") or 0.0)
     go_hint_active = (now_ts < go_until_ts)
-    party_passive = is_party_active() and (not is_party_driver())
+    party_passive = (party_driver_mode() == "off") or (is_party_active() and (not is_party_driver()))
     party_passive_in_dungeon = party_passive and dungeon_runtime
     # Hard gate: passive party role must never click combat/navigation choices.
+    # Includes explicit driver_mode=off even when party_active marker lags.
     # This prevents non-driver accounts from selecting rooms or attacking when
     # dungeon context detection is late/ambiguous on transitional screens.
     can_drive_dungeon = (not party_passive)
